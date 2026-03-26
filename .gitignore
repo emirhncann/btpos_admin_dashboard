@@ -1,0 +1,4 @@
+# Next.js (btpos-panel)
+btpos-panel/node_modules/
+btpos-panel/.next/
+btpos-panel/.env*.local
