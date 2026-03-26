@@ -13,6 +13,7 @@ export interface UserInfo {
   name: string;
   email: string;
   role: string;
+  company_id?: number | string;
 }
 
 export interface LoginPayload {
@@ -55,6 +56,58 @@ export const apiRequest = async <T = unknown>(
   }
 
   return response.json();
+};
+
+// ─── Logo İşbaşı API Kuralları ────────────────────────────────────────────────
+// Swagger'a göre:
+//   - Yeni kayıt: id her zaman 0 gönderilmeli
+//   - Liste sorguları: POST + body'de paging objesi
+//   - Her istekte: apiKey, tenantId, Authorization: Bearer {accessToken}
+
+export const ISBASI_DEFAULT_PAGING = {
+  paging: { currentPage: 1, pageSize: 15 },
+};
+
+export interface IsbasiAuthHeaders {
+  apiKey: string;
+  tenantId: string;
+  accessToken: string;
+}
+
+/**
+ * Logo İşbaşı API'ye istek atar.
+ * Header'lara apiKey, tenantId ve Authorization otomatik eklenir.
+ * Yeni kayıt oluştururken body'deki id alanını 0 olarak bırakın.
+ */
+export const isbasiRequest = async <T = unknown>(
+  baseUrl: string,
+  endpoint: string,
+  auth: IsbasiAuthHeaders,
+  options: RequestInit = {}
+): Promise<T> => {
+  const cleanBase = baseUrl.replace(/\/$/, "");
+
+  const headers: HeadersInit = {
+    "Content-Type": "application/json; charset=utf-8",
+    "apiKey": auth.apiKey,
+    "tenantId": auth.tenantId,
+    "Authorization": `Bearer ${auth.accessToken}`,
+    ...(options.headers as Record<string, string>),
+  };
+
+  const response = await fetch(`${cleanBase}${endpoint}`, {
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(
+      (err as { message?: string }).message ?? `HTTP ${response.status}`
+    );
+  }
+
+  return response.json() as Promise<T>;
 };
 
 /**
