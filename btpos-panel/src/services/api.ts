@@ -110,6 +110,82 @@ export const isbasiRequest = async <T = unknown>(
   return response.json() as Promise<T>;
 };
 
+// ─── Kasa Yönetimi (POS Commands) ────────────────────────────────────────────
+
+export interface SendCommandPayload {
+  company_id: string;
+  command: string;
+  payload?: Record<string, unknown>;
+  send_to_all: boolean;
+  terminal_ids?: string[];
+  created_by?: string;
+}
+
+export interface CommandTarget {
+  id: string;
+  status: "pending" | "processing" | "done" | "failed";
+  error?: string | null;
+  terminals?: { terminal_name?: string };
+}
+
+export interface CommandRecord {
+  id: string;
+  command: string;
+  send_to_all: boolean;
+  created_at: string;
+  terminal_command_targets?: CommandTarget[];
+}
+
+export interface TerminalSettings {
+  poll_interval_sec?: number;
+  is_locked?: boolean;
+  lock_reason?: string;
+}
+
+export async function sendCommand(
+  payload: SendCommandPayload
+): Promise<{ success: boolean; message?: string; target_count?: number }> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const res = await fetch(`${API_URL}/pos/commands/send`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
+export async function getCommandHistory(
+  companyId: string
+): Promise<CommandRecord[]> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const res = await fetch(`${API_URL}/pos/commands/list/${companyId}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  return res.json();
+}
+
+export async function updateTerminalSettings(
+  terminalId: string,
+  settings: TerminalSettings
+): Promise<{ success: boolean; message?: string }> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const res = await fetch(`${API_URL}/pos/commands/settings/${terminalId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(settings),
+  });
+  return res.json();
+}
+
 /**
  * Login / Logout işlemleri
  */

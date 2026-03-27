@@ -44,6 +44,19 @@ interface UsageStats {
   write_count: number;
 }
 
+type ProductTestStatus = "idle" | "fetching" | "success" | "error";
+
+interface IsbasiProduct {
+  id?: string;
+  code?: string;
+  name?: string;
+  barcode?: string;
+  price?: number;
+  vatRate?: number;
+  unit?: string;
+  isActive?: boolean;
+}
+
 // ─── Sabitler ─────────────────────────────────────────────────────────────────
 const READ_LIMIT  = 3000;
 const WRITE_LIMIT = 7000;
@@ -330,7 +343,11 @@ function ErpSettingsPage() {
   const [jsonError, setJsonError]       = useState<string | null>(null);
   const [testStatus, setTestStatus]     = useState<TestStatus>("idle");
   const [testError, setTestError]       = useState<string | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen]   = useState(false);
+  const [productStatus, setProductStatus] = useState<ProductTestStatus>("idle");
+  const [products, setProducts]           = useState<IsbasiProduct[]>([]);
+  const [productError, setProductError]   = useState<string | null>(null);
+  const [productTotal, setProductTotal]   = useState<number | null>(null);
 
   const updateField = useCallback(
     <K extends keyof ErpFormState>(field: K) =>
@@ -491,6 +508,35 @@ function ErpSettingsPage() {
       console.error("[ERP Save] Hata →", err);
       setSaveStatus("error");
       setSaveError("Kayıt sırasında bir hata oluştu.");
+    }
+  };
+
+  // ── Ürün Testi ──────────────────────────────────────────────────────────────
+  const handleTestProducts = async () => {
+    const companyId = getCompanyId();
+    if (!companyId) return;
+    setProductStatus("fetching");
+    setProductError(null);
+    setProducts([]);
+    setProductTotal(null);
+
+    try {
+      const res = await apiRequest<unknown>(`/integration/products/${companyId}`);
+      const raw = (res.data ?? res) as unknown as Record<string, unknown>;
+
+      // İşbaşı yanıt formatı: { data: [...], totalCount: N }
+      const list = (raw?.data as IsbasiProduct[] | undefined) ?? [];
+      const total = (raw?.totalCount as number | undefined) ?? list.length;
+
+      setProducts(list);
+      setProductTotal(total);
+      setProductStatus("success");
+
+      // Sayaçları güncelle (read_count arttı)
+      await fetchData();
+    } catch {
+      setProductStatus("error");
+      setProductError("Ürünler çekilemedi. ERP ayarlarının kaydedildiğinden emin olun.");
     }
   };
 
@@ -881,6 +927,156 @@ function ErpSettingsPage() {
           </p>
         </div>
       </details>
+
+      {/* ── Ürün Testi Kartı ── */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center">
+              <svg className="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10" />
+              </svg>
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">Malzeme Listesi Testi</h3>
+              <p className="text-xs text-gray-400">
+                Kayıtlı kimlik bilgileriyle İşbaşı&apos;na login olur ve ürün listesini çeker.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleTestProducts}
+            disabled={!recordExists || productStatus === "fetching"}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg border border-emerald-200 bg-emerald-50 text-sm font-medium text-emerald-700
+              hover:bg-emerald-100 transition-all
+              disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:border-gray-200 disabled:text-gray-400"
+          >
+            {productStatus === "fetching" ? (
+              <>
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                Çekiliyor...
+              </>
+            ) : (
+              <>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                Malzemeleri Çek
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* Henüz test yapılmadı */}
+        {productStatus === "idle" && (
+          <div className="px-6 py-8 text-center">
+            <p className="text-sm text-gray-400">
+              {recordExists
+                ? "Yukarıdaki butona basarak İşbaşı'ndan ürün listesini çekebilirsiniz."
+                : "Bu testi kullanmak için önce ERP ayarlarını kaydedin."}
+            </p>
+          </div>
+        )}
+
+        {/* Hata */}
+        {productStatus === "error" && productError && (
+          <div className="px-6 py-4">
+            <div className="flex items-start gap-3 bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+              <svg className="w-4 h-4 text-red-500 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+              </svg>
+              <p className="text-sm text-red-700">{productError}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Yükleniyor skeleton */}
+        {productStatus === "fetching" && (
+          <div className="divide-y divide-gray-50">
+            {[1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className="px-6 py-3 flex items-center gap-4">
+                <div className="h-3 w-16 bg-gray-200 rounded animate-pulse" />
+                <div className="h-3 flex-1 bg-gray-100 rounded animate-pulse" />
+                <div className="h-3 w-12 bg-gray-100 rounded animate-pulse" />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Sonuçlar */}
+        {productStatus === "success" && (
+          <>
+            <div className="px-6 py-2.5 bg-emerald-50/60 border-b border-emerald-100 flex items-center gap-2">
+              <svg className="w-4 h-4 text-emerald-500" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+              </svg>
+              <p className="text-xs text-emerald-700 font-medium">
+                {products.length} ürün getirildi
+                {productTotal !== null && productTotal > products.length && (
+                  <span className="text-emerald-600 font-normal"> (toplam {productTotal.toLocaleString("tr-TR")} kayıt)</span>
+                )}
+                <span className="ml-1 text-emerald-500 font-normal">— read_count +1 artırıldı</span>
+              </p>
+            </div>
+
+            {products.length === 0 ? (
+              <div className="px-6 py-8 text-center text-sm text-gray-400">
+                İşbaşı&apos;nda kayıtlı ürün bulunamadı.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50/60 border-b border-gray-100">
+                      <th className="text-left px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">Kod</th>
+                      <th className="text-left px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">Ürün Adı</th>
+                      <th className="text-left px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">Birim</th>
+                      <th className="text-right px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">Fiyat</th>
+                      <th className="text-right px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">KDV</th>
+                      <th className="text-center px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">Durum</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {products.map((p, i) => (
+                      <tr key={p.id ?? i} className="hover:bg-gray-50/40 transition-colors">
+                        <td className="px-5 py-3 font-mono text-xs text-gray-600 bg-gray-50/30">
+                          {p.code ?? "—"}
+                        </td>
+                        <td className="px-5 py-3 font-medium text-gray-800 max-w-xs truncate">
+                          {p.name ?? "—"}
+                        </td>
+                        <td className="px-5 py-3 text-xs text-gray-500">{p.unit ?? "—"}</td>
+                        <td className="px-5 py-3 text-right text-sm font-medium text-gray-800">
+                          {p.price != null
+                            ? p.price.toLocaleString("tr-TR", { minimumFractionDigits: 2 }) + " ₺"
+                            : "—"}
+                        </td>
+                        <td className="px-5 py-3 text-right text-xs text-gray-500">
+                          {p.vatRate != null ? `%${p.vatRate}` : "—"}
+                        </td>
+                        <td className="px-5 py-3 text-center">
+                          {p.isActive === false ? (
+                            <span className="text-xs text-gray-400">Pasif</span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                              Aktif
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       {/* ── Bilgi Notu: API Kuralları ── */}
       <div className="flex items-start gap-3 bg-blue-50 border border-blue-100 rounded-xl px-4 py-3">
