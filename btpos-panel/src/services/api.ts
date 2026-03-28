@@ -169,6 +169,23 @@ export async function getCommandHistory(
   return res.json();
 }
 
+/** Kasa bazlı veya şirket geneli komut geçmişi (hedef kayıtları) */
+export async function getPosCommandHistory(
+  companyId: string,
+  options?: { terminalId?: string; limit?: number }
+): Promise<unknown> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const limit = options?.limit ?? 50;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (options?.terminalId) params.set("terminal_id", options.terminalId);
+  const res = await fetch(
+    `${API_URL}/pos/commands/history/${companyId}?${params.toString()}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+  );
+  return res.json();
+}
+
 export async function updateTerminalSettings(
   terminalId: string,
   settings: TerminalSettings

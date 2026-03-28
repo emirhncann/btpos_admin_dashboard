@@ -8,12 +8,18 @@ import { TOKEN_KEY } from "@/context/AuthContext";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
 // ─── Sabitler ─────────────────────────────────────────────────────────────────
+/** Daha doygun palet (Material 500–600 tonları) */
 const PRESET_COLORS = [
-  "#EF9A9A", "#F48FB1", "#CE93D8", "#9FA8DA",
-  "#90CAF9", "#80DEEA", "#80CBC4", "#A5D6A7",
-  "#C5E1A5", "#E6EE9C", "#FFE082", "#FFCC80",
-  "#FFAB91", "#BCAAA4", "#B0BEC5", "#CFD8DC",
+  "#E53935", "#D81B60", "#8E24AA", "#5E35B1",
+  "#1E88E5", "#039BE5", "#00ACC1", "#00897B",
+  "#43A047", "#7CB342", "#C0CA33", "#F9A825",
+  "#FB8C00", "#F4511E", "#6D4C41", "#546E7A",
 ];
+
+/** Seçili grup satırı arka planı (#RRGGBB + AA) */
+const GROUP_ROW_TINT = "40";
+/** Ürün kartı dış kenar (#RRGGBB + AA) */
+const ITEM_BORDER_TINT = "70";
 
 // ─── Tipler ───────────────────────────────────────────────────────────────────
 interface Workplace {
@@ -449,7 +455,7 @@ function PluPage() {
                       onClick={() => setActiveGroup(g)}
                       className="w-full flex items-center justify-between px-3.5 py-2.5 text-left border-b border-gray-50 transition-colors hover:bg-gray-50"
                       style={{
-                        background: isActive ? g.color + "18" : undefined,
+                        background: isActive ? g.color + GROUP_ROW_TINT : undefined,
                         borderLeft: `3px solid ${isActive ? g.color : "transparent"}`,
                       }}
                     >
@@ -563,7 +569,7 @@ function PluPage() {
                             key={item.id}
                             className="flex items-center justify-between bg-white rounded-lg px-4 py-2.5 border"
                             style={{
-                              borderColor: currentGroup.color + "40",
+                              borderColor: currentGroup.color + ITEM_BORDER_TINT,
                               borderLeftColor: currentGroup.color,
                               borderLeftWidth: 3,
                             }}
