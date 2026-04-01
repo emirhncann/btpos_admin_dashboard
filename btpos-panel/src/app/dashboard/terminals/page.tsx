@@ -37,6 +37,14 @@ const COMMANDS = [
   { key: "restart",        label: "Yeniden Başlat",          needsPayload: false },
 ] as const;
 
+/** Tam / fark güncelleme modu bu komutların payload'ına `mode` olarak eklenir. */
+const SYNC_COMMANDS_WITH_MODE = [
+  "sync_all",
+  "sync_products",
+  "sync_plu",
+  "sync_cashiers",
+] as const;
+
 interface Terminal {
   id: string;
   terminal_name: string;
@@ -164,6 +172,7 @@ function TerminalsPage() {
   const [selCmd, setSelCmd]             = useState<string>(COMMANDS[0].key);
   const [msgText, setMsgText]         = useState("");
   const [lockReason, setLockReason]   = useState("");
+  const [syncMode, setSyncMode]       = useState<"full" | "diff">("full");
   const [sending, setSending]         = useState(false);
   const [toast, setToast]             = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -238,6 +247,9 @@ function TerminalsPage() {
       }
       if (selCmd === "lock") {
         payload.reason = lockReason.trim() || "Yönetici tarafından kilitlendi";
+      }
+      if ((SYNC_COMMANDS_WITH_MODE as readonly string[]).includes(selCmd)) {
+        payload.mode = syncMode;
       }
 
       const res = await sendCommand({
@@ -327,6 +339,42 @@ function TerminalsPage() {
                   ))}
                 </select>
               </div>
+              {(SYNC_COMMANDS_WITH_MODE as readonly string[]).includes(selCmd) && (
+                <div className="mb-1">
+                  <span className="block text-xs font-medium text-gray-500 mb-1.5">
+                    Güncelleme Modu
+                  </span>
+                  <div className="flex gap-2">
+                    {(
+                      [
+                        { key: "full" as const, label: "Tam Güncelleme", desc: "Tümünü sil, yeniden yaz" },
+                        { key: "diff" as const, label: "Fark Güncelleme", desc: "Sadece değişenleri güncelle" },
+                      ] as const
+                    ).map((m) => (
+                      <button
+                        key={m.key}
+                        type="button"
+                        onClick={() => setSyncMode(m.key)}
+                        className={`flex-1 rounded-lg border-[1.5px] px-2.5 py-2 text-left transition-colors cursor-pointer
+                          ${
+                            syncMode === m.key
+                              ? "border-[#1565C0] bg-[#E3F2FD]"
+                              : "border-gray-200 bg-white hover:bg-gray-50"
+                          }`}
+                      >
+                        <div
+                          className={`text-xs font-semibold ${
+                            syncMode === m.key ? "text-[#1565C0]" : "text-gray-700"
+                          }`}
+                        >
+                          {m.label}
+                        </div>
+                        <div className="text-[10px] text-gray-400 mt-0.5">{m.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {selCmd === "message" && (
                 <div>
                   <label htmlFor="msg-text" className="block text-xs font-medium text-gray-500 mb-1.5">

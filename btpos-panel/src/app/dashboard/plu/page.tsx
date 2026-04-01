@@ -46,6 +46,16 @@ interface PluGroup {
 
 type Scope = "company" | "workplace";
 
+interface ErpSearchProduct {
+  id: string;
+  name: string;
+  code: string;
+  barcode?: string;
+  salesPriceTaxIncluded?: number;
+}
+
+const SEARCH_LIMIT = 20;
+
 // ─── Yardımcı ─────────────────────────────────────────────────────────────────
 function getCompanyId(): string {
   if (typeof window === "undefined") return "";
@@ -138,6 +148,13 @@ function PluPage() {
   const [addingItem, setAddingItem] = useState(false);
   const [itemError, setItemError]   = useState("");
 
+  const [productSearch, setProductSearch]     = useState("");
+  const [searchResults, setSearchResults]     = useState<ErpSearchProduct[]>([]);
+  const [searchLoading, setSearchLoading]     = useState(false);
+  const [searchPage, setSearchPage]           = useState(1);
+  const [searchTotal, setSearchTotal]         = useState(0);
+  const [addItemModal, setAddItemModal]       = useState(false);
+
   // ── Yükleyiciler ────────────────────────────────────────────────────────────
   const loadWorkplaces = useCallback(async () => {
     if (!companyId) return;
@@ -171,6 +188,42 @@ function PluPage() {
     else if (activeWp) loadGroups(activeWp.id);
     else setGroups([]);
   }, [scope, activeWp, loadGroups]);
+
+  const searchProducts = useCallback(
+    async (q: string, page = 1) => {
+      if (q.length < 2) {
+        setSearchResults([]);
+        setSearchTotal(0);
+        return;
+      }
+      setSearchLoading(true);
+      try {
+        const res = (await apiFetch(
+          `/integration/products/search/${companyId}?q=${encodeURIComponent(q)}&page=${page}&limit=${SEARCH_LIMIT}`
+        )) as { data?: ErpSearchProduct[]; total?: number };
+        setSearchResults(Array.isArray(res.data) ? res.data : []);
+        setSearchTotal(typeof res.total === "number" ? res.total : 0);
+        setSearchPage(page);
+      } catch {
+        setSearchResults([]);
+        setSearchTotal(0);
+      } finally {
+        setSearchLoading(false);
+      }
+    },
+    [companyId]
+  );
+
+  useEffect(() => {
+    if (!productSearch.trim()) {
+      setSearchResults([]);
+      setSearchTotal(0);
+      setSearchPage(1);
+      return;
+    }
+    const t = setTimeout(() => void searchProducts(productSearch.trim(), 1), 400);
+    return () => clearTimeout(t);
+  }, [productSearch, searchProducts]);
 
   // ── İşyeri İşlemleri ────────────────────────────────────────────────────────
   const addWorkplace = async () => {
@@ -258,6 +311,38 @@ function PluPage() {
     } finally { setAddingItem(false); }
   };
 
+  const addProductToGroup = async (productCode: string) => {
+    if (!activeGroup || !String(productCode).trim()) return;
+    setAddingItem(true);
+    setItemError("");
+    try {
+      const data = await apiFetch("/plu/items", {
+        method: "POST",
+        body: JSON.stringify({
+          group_id:     activeGroup.id,
+          company_id:   scope === "company"   ? companyId    : null,
+          workplace_id: scope === "workplace" ? activeWp?.id : null,
+          product_code: String(productCode).trim(),
+        }),
+      }) as { success?: boolean; message?: string };
+      if (data.success === false) {
+        setItemError(data.message ?? "Hata oluştu.");
+        return;
+      }
+      await reloadGroups();
+    } finally {
+      setAddingItem(false);
+    }
+  };
+
+  const closeAddItemModal = () => {
+    setAddItemModal(false);
+    setProductSearch("");
+    setSearchResults([]);
+    setSearchTotal(0);
+    setSearchPage(1);
+  };
+
   const deleteItem = async (itemId: string, code: string) => {
     if (!confirm(`"${code}" kodlu ürün bu gruptan kaldırılsın mı?`)) return;
     await apiFetch(`/plu/items/${itemId}`, { method: "DELETE" });
@@ -268,9 +353,247 @@ function PluPage() {
     ? (groups.find((g) => g.id === activeGroup.id) ?? activeGroup)
     : null;
 
+  const searchTotalPages = Math.max(1, Math.ceil(searchTotal / SEARCH_LIMIT));
+
   // ─────────────────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] -m-8 overflow-hidden">
+
+      {addItemModal && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 9998,
+            background: "rgba(0,0,0,0.45)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="plu-erp-modal-title"
+        >
+          <div
+            style={{
+              background: "white",
+              borderRadius: 14,
+              padding: 24,
+              width: 520,
+              maxHeight: "80vh",
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span id="plu-erp-modal-title" style={{ fontSize: 16, fontWeight: 600 }}>
+                Ürün Ekle — {activeGroup?.name}
+              </span>
+              <button
+                type="button"
+                onClick={closeAddItemModal}
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize: 20,
+                  color: "#9E9E9E",
+                }}
+                aria-label="Kapat"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ position: "relative" }}>
+              <input
+                autoFocus
+                value={productSearch}
+                onChange={(e) => setProductSearch(e.target.value)}
+                placeholder="Ürün adı veya kodu ile ara (min 2 karakter)..."
+                style={{
+                  width: "100%",
+                  border: "1px solid #E0E0E0",
+                  borderRadius: 10,
+                  padding: "10px 40px 10px 14px",
+                  fontSize: 13,
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+              {searchLoading && (
+                <div
+                  style={{
+                    position: "absolute",
+                    right: 12,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    fontSize: 11,
+                    color: "#9E9E9E",
+                  }}
+                >
+                  ⟳ Aranıyor...
+                </div>
+              )}
+            </div>
+
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+                minHeight: 200,
+              }}
+            >
+              {productSearch.trim().length < 2 && (
+                <div style={{ textAlign: "center", color: "#BDBDBD", padding: "32px 0", fontSize: 13 }}>
+                  En az 2 karakter girin
+                </div>
+              )}
+              {productSearch.trim().length >= 2 && !searchLoading && searchResults.length === 0 && (
+                <div style={{ textAlign: "center", color: "#BDBDBD", padding: "32px 0", fontSize: 13 }}>
+                  Ürün bulunamadı
+                </div>
+              )}
+              {searchResults.map((p) => (
+                <div
+                  key={p.id}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: "1px solid #F0F0F0",
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLDivElement).style.background = "#F8F9FF";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLDivElement).style.background = "white";
+                  }}
+                >
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 500,
+                        color: "#212121",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {p.name}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#9E9E9E",
+                        fontFamily: "monospace",
+                        marginTop: 2,
+                      }}
+                    >
+                      {p.code}
+                      {p.barcode ? ` · ${p.barcode}` : ""}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      flexShrink: 0,
+                      marginLeft: 12,
+                    }}
+                  >
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1565C0" }}>
+                      {p.salesPriceTaxIncluded != null
+                        ? `${p.salesPriceTaxIncluded.toLocaleString("tr-TR", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })} ₺`
+                        : "—"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void addProductToGroup(p.code)}
+                      disabled={addingItem}
+                      style={{
+                        background: "#E3F2FD",
+                        border: "1px solid #90CAF9",
+                        borderRadius: 7,
+                        padding: "6px 12px",
+                        cursor: addingItem ? "default" : "pointer",
+                        fontSize: 12,
+                        fontWeight: 600,
+                        color: "#1565C0",
+                        whiteSpace: "nowrap",
+                        opacity: addingItem ? 0.6 : 1,
+                      }}
+                    >
+                      + Ekle
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {searchTotal > SEARCH_LIMIT && (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  borderTop: "1px solid #F0F0F0",
+                  paddingTop: 12,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => void searchProducts(productSearch.trim(), searchPage - 1)}
+                  disabled={searchPage <= 1}
+                  style={{
+                    background: "#F3F4F6",
+                    border: "1px solid #E0E0E0",
+                    borderRadius: 6,
+                    padding: "6px 12px",
+                    cursor: searchPage <= 1 ? "default" : "pointer",
+                    fontSize: 12,
+                    opacity: searchPage <= 1 ? 0.4 : 1,
+                  }}
+                >
+                  ← Önceki
+                </button>
+
+                <span style={{ fontSize: 12, color: "#9E9E9E" }}>
+                  {searchPage} / {searchTotalPages} · {searchTotal} ürün
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => void searchProducts(productSearch.trim(), searchPage + 1)}
+                  disabled={searchPage >= searchTotalPages}
+                  style={{
+                    background: "#F3F4F6",
+                    border: "1px solid #E0E0E0",
+                    borderRadius: 6,
+                    padding: "6px 12px",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    opacity: searchPage >= searchTotalPages ? 0.4 : 1,
+                  }}
+                >
+                  Sonraki →
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── Üst Bar: Kapsam ── */}
       <div className="flex items-center gap-3 px-5 py-3 bg-white border-b border-gray-200 shrink-0 flex-wrap">
@@ -511,11 +834,29 @@ function PluPage() {
                       </span>
                     )}
                   </div>
-                  <ColorPicker
-                    selected={currentGroup.color}
-                    onSelect={(c) => updateGroupColor(currentGroup.id, c)}
-                    size={16}
-                  />
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setAddItemModal(true)}
+                      style={{
+                        background: "#1565C0",
+                        color: "white",
+                        border: "none",
+                        borderRadius: 8,
+                        padding: "8px 16px",
+                        cursor: "pointer",
+                        fontSize: 13,
+                        fontWeight: 600,
+                      }}
+                    >
+                      + ERP&apos;den Ürün Ekle
+                    </button>
+                    <ColorPicker
+                      selected={currentGroup.color}
+                      onSelect={(c) => updateGroupColor(currentGroup.id, c)}
+                      size={16}
+                    />
+                  </div>
                 </div>
 
                 {/* Ürün Ekle Satırı */}
