@@ -7,7 +7,7 @@ import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
 type Level = "company" | "workplace" | "terminal";
-type Tab = "gorunum" | "satis" | "iskonto";
+type Tab = "gorunum" | "satis" | "iskonto" | "plu_grid";
 type DuplicateItemAction = "increase_qty" | "add_new";
 
 interface Settings {
@@ -19,6 +19,11 @@ interface Settings {
   allowDocDiscount: boolean;
   maxLineDiscountPct: number;
   maxDocDiscountPct: number;
+  pluCols: number;
+  pluRows: number;
+  fontSizeName: number;
+  fontSizePrice: number;
+  fontSizeCode: number;
 }
 
 interface Terminal {
@@ -63,6 +68,7 @@ const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: "gorunum", label: "Görünüm", icon: "👁" },
   { key: "satis", label: "Satış", icon: "🛒" },
   { key: "iskonto", label: "İskonto", icon: "%" },
+  { key: "plu_grid", label: "PLU Izgarası", icon: "▦" },
 ];
 
 const DEFAULT_SETTINGS: Settings = {
@@ -74,6 +80,11 @@ const DEFAULT_SETTINGS: Settings = {
   allowDocDiscount: true,
   maxLineDiscountPct: 100,
   maxDocDiscountPct: 100,
+  pluCols: 4,
+  pluRows: 3,
+  fontSizeName: 12,
+  fontSizePrice: 13,
+  fontSizeCode: 9,
 };
 
 function Toggle({ on, onChange }: { on: boolean; onChange: () => void }) {
@@ -140,6 +151,203 @@ function SettingRow({
   );
 }
 
+function hexToSoft(hex: string): string {
+  try {
+    if (!hex?.startsWith("#") || hex.length < 7) return "rgba(21,101,192,0.13)";
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    if ([r, g, b].some((n) => Number.isNaN(n))) return "#E3F2FD";
+    return `rgba(${r},${g},${b},0.13)`;
+  } catch {
+    return "#E3F2FD";
+  }
+}
+
+const PREVIEW_GROUPS = [
+  { name: "İçecek", color: "#0077b6" },
+  { name: "Ekmek", color: "#fca311" },
+  { name: "Manav", color: "#2a9d8f" },
+  { name: "Et", color: "#e76f51" },
+  { name: "Çerez", color: "#8338ec" },
+  { name: "Temizlik", color: "#457b9d" },
+];
+
+const PREVIEW_PRODUCTS = [
+  { name: "Kola 330ml", code: "KOL001", price: "18,50 ₺" },
+  { name: "Ayran", code: "AYR001", price: "12,00 ₺" },
+  { name: "Su 0.5L", code: "SU001", price: "6,00 ₺" },
+  { name: "Meyve Suyu", code: "MEY001", price: "22,00 ₺" },
+  { name: "Soda", code: "SOD001", price: "9,50 ₺" },
+  { name: "Enerji", code: "ENR001", price: "35,00 ₺" },
+  { name: "Beyaz Ekmek", code: "EKM001", price: "10,00 ₺" },
+  { name: "Simit", code: "SIM001", price: "7,00 ₺" },
+  { name: "Domates", code: "DOM001", price: "32,00 ₺" },
+  { name: "Elma", code: "ELM001", price: "35,00 ₺" },
+  { name: "Muz", code: "MUZ001", price: "42,00 ₺" },
+  { name: "Tavuk But", code: "TAV001", price: "180,00 ₺" },
+  { name: "Kıyma", code: "KIY001", price: "220,00 ₺" },
+  { name: "Süt 1L", code: "SUT001", price: "36,00 ₺" },
+  { name: "Cips", code: "CPS001", price: "25,00 ₺" },
+  { name: "Çikolata", code: "CKL001", price: "35,00 ₺" },
+  { name: "Deterjan", code: "DET001", price: "65,00 ₺" },
+  { name: "Şampuan", code: "SAM001", price: "45,00 ₺" },
+  { name: "Sabun", code: "SAB001", price: "15,00 ₺" },
+  { name: "Peynir", code: "PEY001", price: "85,00 ₺" },
+  { name: "Yoğurt", code: "YOG001", price: "22,00 ₺" },
+  { name: "Tereyağı", code: "TER001", price: "95,00 ₺" },
+  { name: "Pirinç", code: "PIR001", price: "48,00 ₺" },
+  { name: "Makarna", code: "MAK001", price: "28,00 ₺" },
+  { name: "Un", code: "UN001", price: "35,00 ₺" },
+  { name: "Şeker", code: "SEK001", price: "42,00 ₺" },
+  { name: "Tuz", code: "TUZ001", price: "18,00 ₺" },
+  { name: "Zeytinyağı", code: "ZEY001", price: "250,00 ₺" },
+  { name: "Çay 500g", code: "CAY001", price: "65,00 ₺" },
+  { name: "Salatalık", code: "SAL001", price: "18,00 ₺" },
+  { name: "Biber", code: "BIB001", price: "24,00 ₺" },
+  { name: "Pide", code: "PID001", price: "20,00 ₺" },
+];
+
+function PluGridPreview({ settings }: { settings: Settings }) {
+  const [selected, setSelected] = useState<number | null>(null);
+  const total = settings.pluCols * settings.pluRows;
+
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 10,
+        }}
+      >
+        <div style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Canlı Önizleme</div>
+        <span
+          style={{
+            fontSize: 11,
+            padding: "2px 8px",
+            borderRadius: 4,
+            background: "#E3F2FD",
+            color: "#1565C0",
+            fontWeight: 500,
+          }}
+        >
+          {settings.pluCols} × {settings.pluRows}
+        </span>
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${settings.pluCols}, minmax(0, 1fr))`,
+          gridTemplateRows: `repeat(${settings.pluRows}, minmax(52px, 1fr))`,
+          gap: 5,
+          background: "#F8F9FA",
+          borderRadius: 10,
+          padding: 8,
+          border: "1px solid #E5E7EB",
+        }}
+      >
+        {Array.from({ length: total }).map((_, i) => {
+          const p = PREVIEW_PRODUCTS[i % PREVIEW_PRODUCTS.length];
+          const grp = PREVIEW_GROUPS[i % PREVIEW_GROUPS.length];
+          const soft = hexToSoft(grp.color);
+          const isSel = selected === i;
+          return (
+            <div
+              key={i}
+              role="button"
+              tabIndex={0}
+              onClick={() => setSelected(isSel ? null : i)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSelected(isSel ? null : i);
+                }
+              }}
+              style={{
+                borderRadius: 8,
+                background: soft,
+                border: `2px solid ${isSel ? grp.color : "transparent"}`,
+                cursor: "pointer",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 2,
+                padding: "6px 4px",
+                minHeight: 52,
+                transition: "border-color 0.15s",
+                overflow: "hidden",
+              }}
+              onMouseEnter={(e) => {
+                if (!isSel) (e.currentTarget as HTMLDivElement).style.borderColor = grp.color;
+              }}
+              onMouseLeave={(e) => {
+                if (!isSel) (e.currentTarget as HTMLDivElement).style.borderColor = "transparent";
+              }}
+            >
+              <div
+                style={{
+                  fontSize: settings.fontSizeName,
+                  fontWeight: 600,
+                  color: "#374151",
+                  textAlign: "center",
+                  lineHeight: 1.2,
+                  wordBreak: "break-word",
+                }}
+              >
+                {p.name}
+              </div>
+              {settings.showCode && (
+                <div
+                  style={{
+                    fontSize: settings.fontSizeCode,
+                    color: "#9ca3af",
+                    fontFamily: "monospace",
+                  }}
+                >
+                  {p.code}
+                </div>
+              )}
+              {settings.showPrice && (
+                <div
+                  style={{
+                    fontSize: settings.fontSizePrice,
+                    fontWeight: 700,
+                    color: grp.color,
+                  }}
+                >
+                  {p.price}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {selected !== null && (
+        <div
+          style={{
+            marginTop: 8,
+            padding: "8px 12px",
+            borderRadius: 8,
+            background: "#F0F4FF",
+            border: "1px solid #C7D7FD",
+            fontSize: 12,
+            color: "#374151",
+          }}
+        >
+          Seçili: <strong>{PREVIEW_PRODUCTS[selected % PREVIEW_PRODUCTS.length].name}</strong>
+          {" · "}
+          {PREVIEW_PRODUCTS[selected % PREVIEW_PRODUCTS.length].code}
+          {" · "}
+          {PREVIEW_PRODUCTS[selected % PREVIEW_PRODUCTS.length].price}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PosSettingsPage() {
   const companyId = getCompanyId();
 
@@ -191,6 +399,11 @@ function PosSettingsPage() {
         allowDocDiscount: Boolean(d.allow_doc_discount ?? true),
         maxLineDiscountPct: parseFloat(String(d.max_line_discount_pct ?? 100)) || 100,
         maxDocDiscountPct: parseFloat(String(d.max_doc_discount_pct ?? 100)) || 100,
+        pluCols: typeof d.plu_cols === "number" ? d.plu_cols : 4,
+        pluRows: typeof d.plu_rows === "number" ? d.plu_rows : 3,
+        fontSizeName: typeof d.font_size_name === "number" ? d.font_size_name : 12,
+        fontSizePrice: typeof d.font_size_price === "number" ? d.font_size_price : 13,
+        fontSizeCode: typeof d.font_size_code === "number" ? d.font_size_code : 9,
       });
     } catch {
       setSettings(DEFAULT_SETTINGS);
@@ -222,6 +435,11 @@ function PosSettingsPage() {
       allow_doc_discount: settings.allowDocDiscount,
       max_line_discount_pct: settings.maxLineDiscountPct,
       max_doc_discount_pct: settings.maxDocDiscountPct,
+      plu_cols: settings.pluCols,
+      plu_rows: settings.pluRows,
+      font_size_name: settings.fontSizeName,
+      font_size_price: settings.fontSizePrice,
+      font_size_code: settings.fontSizeCode,
     };
     if (level === "workplace" && selectedWp) body.workplace_id = selectedWp;
     if (level === "terminal" && selectedTerm) body.terminal_id = selectedTerm;
@@ -258,7 +476,7 @@ function PosSettingsPage() {
       <div style={{ marginBottom: 24 }}>
         <h1 style={{ fontSize: 22, fontWeight: 700, color: "#111", margin: 0 }}>POS Ayarları</h1>
         <p style={{ fontSize: 13, color: "#9E9E9E", marginTop: 4 }}>
-          PLU görünümü, satış davranışı ve iskonto kurallarını seviyeye göre yönetin.
+          PLU görünümü, ızgara, fontlar, satış davranışı ve iskonto kurallarını seviyeye göre yönetin.
         </p>
       </div>
 
@@ -547,6 +765,186 @@ function PosSettingsPage() {
               </p>
             </div>
           </>
+        )}
+
+        {tab === "plu_grid" && (
+          <div style={{ padding: "16px 0" }}>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>
+                Izgara Boyutu
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {(
+                  [
+                    { key: "pluCols" as const, label: "Kolon sayısı", min: 2, max: 8 },
+                    { key: "pluRows" as const, label: "Satır sayısı", min: 2, max: 8 },
+                  ] as const
+                ).map((field) => (
+                  <div key={field.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 13, color: "#6B7280", width: 100, flexShrink: 0 }}>
+                      {field.label}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => set(field.key, Math.max(field.min, settings[field.key] - 1))}
+                      disabled={settings[field.key] <= field.min}
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 6,
+                        border: "1px solid #E0E0E0",
+                        background: "white",
+                        cursor: "pointer",
+                        fontSize: 16,
+                        fontWeight: 500,
+                        opacity: settings[field.key] <= field.min ? 0.3 : 1,
+                      }}
+                    >
+                      −
+                    </button>
+                    <span
+                      style={{
+                        fontSize: 16,
+                        fontWeight: 600,
+                        color: "#111",
+                        minWidth: 28,
+                        textAlign: "center",
+                      }}
+                    >
+                      {settings[field.key]}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => set(field.key, Math.min(field.max, settings[field.key] + 1))}
+                      disabled={settings[field.key] >= field.max}
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 6,
+                        border: "1px solid #E0E0E0",
+                        background: "white",
+                        cursor: "pointer",
+                        fontSize: 16,
+                        fontWeight: 500,
+                        opacity: settings[field.key] >= field.max ? 0.3 : 1,
+                      }}
+                    >
+                      +
+                    </button>
+                    <span style={{ fontSize: 12, color: "#9E9E9E" }}>
+                      ({field.min}–{field.max})
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  background: "#F3F4F6",
+                  fontSize: 12,
+                  color: "#6B7280",
+                }}
+              >
+                Toplam <strong style={{ color: "#111" }}>{settings.pluCols * settings.pluRows}</strong>{" "}
+                tuş gösterilecek
+              </div>
+            </div>
+
+            <div style={{ height: 1, background: "#F0F0F0", marginBottom: 20 }} />
+
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 12 }}>
+                Font Boyutları
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {(
+                  [
+                    { key: "fontSizeName" as const, label: "Ürün adı", min: 8, max: 20 },
+                    { key: "fontSizePrice" as const, label: "Fiyat", min: 8, max: 22 },
+                    { key: "fontSizeCode" as const, label: "Ürün kodu", min: 7, max: 14 },
+                  ] as const
+                ).map((field) => (
+                  <div key={field.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 13, color: "#6B7280", width: 100, flexShrink: 0 }}>
+                      {field.label}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => set(field.key, Math.max(field.min, settings[field.key] - 1))}
+                      disabled={settings[field.key] <= field.min}
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 5,
+                        border: "1px solid #E0E0E0",
+                        background: "white",
+                        cursor: "pointer",
+                        fontSize: 14,
+                        opacity: settings[field.key] <= field.min ? 0.3 : 1,
+                      }}
+                    >
+                      −
+                    </button>
+                    <span
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        color: "#111",
+                        minWidth: 28,
+                        textAlign: "center",
+                      }}
+                    >
+                      {settings[field.key]}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => set(field.key, Math.min(field.max, settings[field.key] + 1))}
+                      disabled={settings[field.key] >= field.max}
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 5,
+                        border: "1px solid #E0E0E0",
+                        background: "white",
+                        cursor: "pointer",
+                        fontSize: 14,
+                        opacity: settings[field.key] >= field.max ? 0.3 : 1,
+                      }}
+                    >
+                      +
+                    </button>
+                    <span style={{ fontSize: 11, color: "#9E9E9E" }}>px</span>
+                    <span
+                      style={{
+                        fontSize: settings[field.key],
+                        color:
+                          field.key === "fontSizePrice"
+                            ? "#1565C0"
+                            : field.key === "fontSizeCode"
+                              ? "#9ca3af"
+                              : "#374151",
+                        fontWeight: field.key !== "fontSizeCode" ? 600 : 400,
+                        fontFamily: field.key === "fontSizeCode" ? "monospace" : "inherit",
+                        marginLeft: 8,
+                      }}
+                    >
+                      {field.key === "fontSizeName"
+                        ? "Kola 330ml"
+                        : field.key === "fontSizePrice"
+                          ? "18,50 ₺"
+                          : "KOL001"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ height: 1, background: "#F0F0F0", marginBottom: 20 }} />
+
+            <PluGridPreview settings={settings} />
+          </div>
         )}
       </div>
 
