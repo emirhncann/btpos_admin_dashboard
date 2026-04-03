@@ -361,6 +361,7 @@ function PosSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [listsLoading, setListsLoading] = useState(true);
+  const [applyToTerminals, setApplyToTerminals] = useState(false);
 
   const loadLists = useCallback(async () => {
     if (!companyId) {
@@ -418,6 +419,10 @@ function PosSettingsPage() {
     if (companyId) void loadSettings();
   }, [companyId, loadSettings]);
 
+  useEffect(() => {
+    setApplyToTerminals(false);
+  }, [level, selectedWp]);
+
   const set = <K extends keyof Settings>(key: K, val: Settings[K]) =>
     setSettings((s) => ({ ...s, [key]: val }));
 
@@ -443,16 +448,29 @@ function PosSettingsPage() {
     };
     if (level === "workplace" && selectedWp) body.workplace_id = selectedWp;
     if (level === "terminal" && selectedTerm) body.terminal_id = selectedTerm;
+    if (level === "workplace") {
+      body.apply_to_terminals = applyToTerminals;
+    }
     try {
-      const data = await apiFetch<{ success?: boolean; message?: string }>("/pos-settings/save", {
+      const data = await apiFetch<{
+        success?: boolean;
+        message?: string;
+        action?: string;
+        count?: number;
+      }>("/pos-settings/save", {
         method: "POST",
         body: JSON.stringify(body),
       });
-      setResult(
-        data.success
-          ? { ok: true, text: "Ayarlar kaydedildi ✓" }
-          : { ok: false, text: data.message ?? "Kayıt başarısız." }
-      );
+      if (data.success) {
+        if (data.action === "bulk_terminal") {
+          setResult({ ok: true, text: `${data.count ?? 0} kasaya uygulandı ✓` });
+        } else {
+          setResult({ ok: true, text: "Ayarlar kaydedildi ✓" });
+        }
+        setApplyToTerminals(false);
+      } else {
+        setResult({ ok: false, text: data.message ?? "Kayıt başarısız." });
+      }
     } catch {
       setResult({ ok: false, text: "Sunucuya ulaşılamadı." });
     } finally {
@@ -540,27 +558,81 @@ function PosSettingsPage() {
         </div>
 
         {level === "workplace" && (
-          <select
-            value={selectedWp}
-            onChange={(e) => setSelectedWp(e.target.value)}
-            disabled={listsLoading}
-            style={{
-              width: "100%",
-              border: "1px solid #E0E0E0",
-              borderRadius: 8,
-              padding: "9px 12px",
-              fontSize: 13,
-              outline: "none",
-              background: "white",
-            }}
-          >
-            <option value="">— İşyeri seçin —</option>
-            {workplaces.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
-            ))}
-          </select>
+          <>
+            <select
+              value={selectedWp}
+              onChange={(e) => setSelectedWp(e.target.value)}
+              disabled={listsLoading}
+              style={{
+                width: "100%",
+                border: "1px solid #E0E0E0",
+                borderRadius: 8,
+                padding: "9px 12px",
+                fontSize: 13,
+                outline: "none",
+                background: "white",
+              }}
+            >
+              <option value="">— İşyeri seçin —</option>
+              {workplaces.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+            {selectedWp && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "10px 0",
+                  borderTop: "1px solid #F0F0F0",
+                  marginTop: 8,
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: "#212121" }}>
+                    Tüm Kasalara Uygula
+                  </div>
+                  <div style={{ fontSize: 11, color: "#9E9E9E", marginTop: 2 }}>
+                    Bu işyerine bağlı kurulu tüm kasalara aynı ayarı yazar
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={applyToTerminals}
+                  onClick={() => setApplyToTerminals((p) => !p)}
+                  style={{
+                    width: 44,
+                    height: 24,
+                    borderRadius: 12,
+                    cursor: "pointer",
+                    border: "none",
+                    padding: 0,
+                    flexShrink: 0,
+                    background: applyToTerminals ? "#1565C0" : "#E0E0E0",
+                    position: "relative",
+                    transition: "background 0.2s",
+                  }}
+                >
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: 3,
+                      left: applyToTerminals ? 23 : 3,
+                      width: 18,
+                      height: 18,
+                      borderRadius: "50%",
+                      background: "white",
+                      transition: "left 0.2s",
+                    }}
+                  />
+                </button>
+              </div>
+            )}
+          </>
         )}
 
         {level === "terminal" && (
