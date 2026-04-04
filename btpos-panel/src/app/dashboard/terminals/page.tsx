@@ -52,7 +52,24 @@ interface Terminal {
   is_installed: boolean;
   device_uid?: string;
   last_seen_at?: string;
+  workplace_id?: string;
+  workplaces?: { id: string; name: string } | null;
 }
+
+interface Workplace {
+  id: string;
+  name: string;
+}
+
+type TargetType = "terminal" | "workplace" | "company";
+
+const COPY_GROUPS = [
+  { key: "pos_settings", label: "POS Ayarları", icon: "⚙" },
+  { key: "cashiers", label: "Kasiyerler", icon: "👤" },
+  { key: "plu", label: "PLU Grupları", icon: "▦" },
+] as const;
+
+type CopyGroupKey = (typeof COPY_GROUPS)[number]["key"];
 
 interface CmdHistoryRow {
   id: string;
@@ -93,6 +110,7 @@ function parseTerminalsPayload(data: unknown): Terminal[] {
         : [];
   return raw.map((t) => {
     const r = t as Record<string, unknown>;
+    const wp = r.workplaces;
     return {
       id:            String(r.id ?? ""),
       terminal_name: String(r.terminal_name ?? ""),
@@ -100,7 +118,28 @@ function parseTerminalsPayload(data: unknown): Terminal[] {
       is_installed:  Boolean(r.is_installed),
       device_uid:    r.device_uid != null ? String(r.device_uid) : undefined,
       last_seen_at:  r.last_seen_at != null ? String(r.last_seen_at) : undefined,
+      workplace_id:  r.workplace_id != null ? String(r.workplace_id) : undefined,
+      workplaces:
+        wp != null && typeof wp === "object"
+          ? {
+              id:   String((wp as { id?: unknown }).id ?? ""),
+              name: String((wp as { name?: unknown }).name ?? ""),
+            }
+          : undefined,
     };
+  });
+}
+
+function parseWorkplacesPayload(data: unknown): Workplace[] {
+  const raw =
+    data && typeof data === "object" && "data" in data && Array.isArray((data as { data: unknown }).data)
+      ? (data as { data: unknown[] }).data
+      : Array.isArray(data)
+        ? data
+        : [];
+  return raw.map((w) => {
+    const r = w as Record<string, unknown>;
+    return { id: String(r.id ?? ""), name: String(r.name ?? "") };
   });
 }
 
@@ -162,6 +201,7 @@ function TerminalsPage() {
   const companyId = getCompanyId();
 
   const [terminals, setTerminals]       = useState<Terminal[]>([]);
+  const [workplaces, setWorkplaces]     = useState<Workplace[]>([]);
   const [loading, setLoading]           = useState(true);
   const [selectedTerm, setSelectedTerm] = useState<Terminal | null>(null);
   const [showSendCmd, setShowSendCmd]   = useState(false);
@@ -176,6 +216,18 @@ function TerminalsPage() {
   const [sending, setSending]         = useState(false);
   const [toast, setToast]             = useState<{ ok: boolean; text: string } | null>(null);
 
+  const [showCopyModal, setShowCopyModal]       = useState(false);
+  const [sourceTerminalId, setSourceTerminalId] = useState("");
+  const [selectedGroups, setSelectedGroups]     = useState<CopyGroupKey[]>(["pos_settings"]);
+  const [targetType, setTargetType]             = useState<TargetType>("terminal");
+  const [targetId, setTargetId]                 = useState("");
+  const [copying, setCopying]                   = useState(false);
+  const [copyResult, setCopyResult]             = useState<{
+    ok: boolean;
+    text: string;
+    detail?: string;
+  } | null>(null);
+
   const loadTerminals = useCallback(async () => {
     if (!companyId) {
       setLoading(false);
@@ -183,15 +235,85 @@ function TerminalsPage() {
     }
     setLoading(true);
     try {
-      const res = await apiRequest<unknown>(`/management/licenses/terminals/${companyId}`);
-      const body = (res as { data?: unknown }).data ?? res;
-      setTerminals(parseTerminalsPayload(body));
+      const [termRes, wpRes] = await Promise.all([
+        apiRequest<unknown>(`/management/licenses/terminals/${companyId}`),
+        apiRequest<unknown>(`/workplaces/${companyId}`),
+      ]);
+      const termBody = (termRes as { data?: unknown }).data ?? termRes;
+      const wpBody = (wpRes as { data?: unknown }).data ?? wpRes;
+      setTerminals(parseTerminalsPayload(termBody));
+      setWorkplaces(parseWorkplacesPayload(wpBody));
     } catch {
       setTerminals([]);
+      setWorkplaces([]);
     } finally {
       setLoading(false);
     }
   }, [companyId]);
+
+  function openCopyModal(terminalId: string) {
+    setSourceTerminalId(terminalId);
+    setSelectedGroups(["pos_settings"]);
+    setTargetType("terminal");
+    setTargetId("");
+    setCopyResult(null);
+    setShowCopyModal(true);
+  }
+
+  function toggleGroup(key: CopyGroupKey) {
+    setSelectedGroups((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  }
+
+  async function doCopy() {
+    if (!sourceTerminalId || selectedGroups.length === 0) return;
+    if (targetType !== "company" && !targetId) return;
+    setCopying(true);
+    setCopyResult(null);
+    try {
+      const body: Record<string, unknown> = {
+        source_terminal_id: sourceTerminalId,
+        groups: selectedGroups,
+        target_type: targetType,
+        target_id: targetType === "company" ? companyId : targetId,
+      };
+      type CopySettingsResponse = {
+        success?: boolean;
+        message?: string;
+        target_count?: number;
+        copied_groups?: string[];
+        commands_sent?: string[];
+      };
+      const raw = await apiRequest<CopySettingsResponse>("/terminals/copy-settings", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      const unwrapped =
+        raw && typeof raw === "object" && "data" in raw && (raw as { data?: CopySettingsResponse }).data != null
+          ? (raw as { data: CopySettingsResponse }).data
+          : (raw as CopySettingsResponse);
+      const data = unwrapped;
+
+      if (data.success) {
+        setCopyResult({
+          ok: true,
+          text: `${data.target_count ?? 0} kasaya kopyalandı ✓`,
+          detail: `Gruplar: ${data.copied_groups?.join(", ") ?? "—"} · Komutlar: ${data.commands_sent?.join(", ") ?? "—"}`,
+        });
+        void loadTerminals();
+      } else {
+        setCopyResult({ ok: false, text: data.message ?? "Kopyalama başarısız." });
+      }
+    } catch {
+      setCopyResult({ ok: false, text: "Sunucuya ulaşılamadı." });
+    } finally {
+      setCopying(false);
+    }
+  }
+
+  const sourceTerm = terminals.find((t) => t.id === sourceTerminalId);
+  const targetTerminals = terminals.filter((t) => t.id !== sourceTerminalId && t.is_installed);
 
   const loadHistory = useCallback(
     async (terminalId?: string | null) => {
@@ -430,6 +552,184 @@ function TerminalsPage() {
         </div>
       )}
 
+      {/* Ayarları kopyala modal */}
+      {showCopyModal && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="copy-settings-title"
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
+              <div>
+                <h2 id="copy-settings-title" className="text-base font-semibold text-gray-900">
+                  Ayarları Kopyala
+                </h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Kaynak: {sourceTerm?.terminal_name ?? "—"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCopyModal(false)}
+                className="p-1 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                aria-label="Kapat"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-5 overflow-y-auto flex-1 min-h-0">
+              <div>
+                <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2.5">
+                  Kopyalanacak Ayarlar
+                </p>
+                <div className="flex flex-col gap-1.5">
+                  {COPY_GROUPS.map((g) => (
+                    <label
+                      key={g.key}
+                      className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-lg cursor-pointer border transition-colors
+                        ${
+                          selectedGroups.includes(g.key)
+                            ? "bg-[#E3F2FD] border-[#90CAF9]"
+                            : "bg-gray-50 border-gray-200 hover:bg-gray-100"
+                        }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedGroups.includes(g.key)}
+                        onChange={() => toggleGroup(g.key)}
+                        className="w-4 h-4 rounded border-gray-300 text-[#1565C0] focus:ring-blue-500"
+                      />
+                      <span className="text-base leading-none">{g.icon}</span>
+                      <span
+                        className={`text-sm font-medium ${
+                          selectedGroups.includes(g.key) ? "text-[#1565C0]" : "text-gray-700"
+                        }`}
+                      >
+                        {g.label}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-2.5">
+                  Hedef
+                </p>
+                <div className="grid grid-cols-3 gap-1.5 mb-3">
+                  {(
+                    [
+                      { key: "terminal" as const, label: "Tek Kasa" },
+                      { key: "workplace" as const, label: "İşyeri Kasaları" },
+                      { key: "company" as const, label: "Tüm Kasalar" },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => {
+                        setTargetType(opt.key);
+                        setTargetId("");
+                      }}
+                      className={`px-1.5 py-2 rounded-lg text-xs font-medium border-[1.5px] transition-colors cursor-pointer
+                        ${
+                          targetType === opt.key
+                            ? "border-[#1565C0] bg-[#E3F2FD] text-[#1565C0]"
+                            : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                        }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {targetType === "terminal" && (
+                  <select
+                    value={targetId}
+                    onChange={(e) => setTargetId(e.target.value)}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800 bg-white
+                      focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">— Hedef kasa seçin —</option>
+                    {targetTerminals.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.terminal_name}
+                        {t.workplaces?.name ? ` — ${t.workplaces.name}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {targetType === "workplace" && (
+                  <select
+                    value={targetId}
+                    onChange={(e) => setTargetId(e.target.value)}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800 bg-white
+                      focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">— İşyeri seçin —</option>
+                    {workplaces.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {targetType === "company" && (
+                  <div className="px-3.5 py-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                    Firmadaki tüm kurulu kasalara ({targetTerminals.length} kasa) kopyalanacak.
+                  </div>
+                )}
+              </div>
+              {copyResult && (
+                <div
+                  className={`rounded-lg border px-3.5 py-2.5 text-xs font-medium
+                    ${
+                      copyResult.ok
+                        ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                        : "bg-red-50 border-red-200 text-red-800"
+                    }`}
+                >
+                  <p>{copyResult.text}</p>
+                  {copyResult.detail && (
+                    <p
+                      className={`text-[11px] font-normal mt-1 ${
+                        copyResult.ok ? "text-emerald-700" : "text-red-700"
+                      }`}
+                    >
+                      {copyResult.detail}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2 px-5 py-4 border-t border-gray-100 bg-gray-50 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowCopyModal(false)}
+                className="flex-1 px-3 py-2.5 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+              >
+                İptal
+              </button>
+              <button
+                type="button"
+                onClick={() => void doCopy()}
+                disabled={
+                  copying ||
+                  selectedGroups.length === 0 ||
+                  (targetType !== "company" && !targetId)
+                }
+                className="flex-[2] px-3 py-2.5 text-sm font-semibold rounded-lg bg-[#1565C0] text-white hover:bg-[#0D47A1]
+                  disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {copying ? "Kopyalanıyor..." : "Kopyala ve Güncelle"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Komut geçmişi modal */}
       {showHistory && (
         <div
@@ -521,7 +821,9 @@ function TerminalsPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Kasa yönetimi</h1>
           <p className="text-sm text-gray-500 mt-1">
-            {loading ? "Yükleniyor…" : `${terminals.length} kasa`}
+            {loading
+              ? "Yükleniyor…"
+              : `${terminals.length} kasa · Ayarları kasalar arasında kopyalayabilirsiniz.`}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -577,6 +879,9 @@ function TerminalsPage() {
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-gray-900">{t.terminal_name}</p>
                   <p className="text-xs text-gray-500 mt-0.5">
+                    {t.workplaces?.name && (
+                      <span className="mr-2">📍 {t.workplaces.name}</span>
+                    )}
                     {t.device_name ?? "Cihaz adı yok"}
                     {t.device_uid && (
                       <span className="font-mono ml-2">{t.device_uid.slice(0, 12)}…</span>
@@ -589,7 +894,7 @@ function TerminalsPage() {
                   )}
                 </div>
               </div>
-              <div className="flex gap-2 shrink-0 sm:ml-auto">
+              <div className="flex flex-wrap gap-2 shrink-0 sm:ml-auto justify-end">
                 <button
                   type="button"
                   onClick={() => openTerminalHistory(t)}
@@ -597,6 +902,15 @@ function TerminalsPage() {
                 >
                   Geçmiş
                 </button>
+                {t.is_installed && (
+                  <button
+                    type="button"
+                    onClick={() => openCopyModal(t.id)}
+                    className="px-3 py-2 text-xs font-semibold rounded-lg border border-[#90CAF9] bg-[#E3F2FD] text-[#1565C0] hover:bg-[#BBDEFB] whitespace-nowrap"
+                  >
+                    ⧉ Ayarları Kopyala
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
