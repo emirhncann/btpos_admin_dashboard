@@ -16,6 +16,7 @@ interface Cashier {
   role: CashierRole;
   is_active: boolean;
   created_at: string;
+  card_number?: string | null;
 }
 
 interface AddForm {
@@ -23,6 +24,7 @@ interface AddForm {
   cashier_code: string;
   password: string;
   role: CashierRole;
+  card_number: string;
 }
 
 type SubmitStatus = "idle" | "submitting" | "success" | "error";
@@ -33,6 +35,7 @@ const EMPTY_FORM: AddForm = {
   cashier_code: "",
   password:     "",
   role:         "cashier",
+  card_number:  "",
 };
 
 // ─── Yardımcı ─────────────────────────────────────────────────────────────────
@@ -46,6 +49,11 @@ function getCompanyId(): string | null {
   } catch {
     return null;
   }
+}
+
+async function apiFetch<T = unknown>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  const res = await apiRequest<T>(endpoint, options);
+  return (((res as { data?: unknown }).data ?? res) as unknown) as T;
 }
 
 // ─── Badge ────────────────────────────────────────────────────────────────────
@@ -125,6 +133,7 @@ function AddCashierModal({
           cashier_code: form.cashier_code,
           password:     form.password,
           role:         form.role,
+          ...(form.card_number.trim() ? { card_number: form.card_number.trim() } : {}),
         }),
       });
 
@@ -282,6 +291,36 @@ function AddCashierModal({
             )}
           </div>
 
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Kasiyer Kartı (Barkod)
+              <span className="ml-1 text-xs text-gray-400 font-normal">— opsiyonel</span>
+            </label>
+            <div className="relative">
+              <input
+                type="text"
+                value={form.card_number}
+                onChange={(e) => set("card_number")(e.target.value)}
+                placeholder="Barkod okutun veya manuel girin"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm
+                  focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+              />
+              {form.card_number && (
+                <button
+                  type="button"
+                  onClick={() => set("card_number")("")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400
+                    hover:text-gray-600 text-lg leading-none"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-gray-400">
+              Kasiyerin barkodlu kartını okutarak otomatik doldurun
+            </p>
+          </div>
+
           {/* Genel hata */}
           {status === "error" && error && (
             <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
@@ -350,6 +389,16 @@ function CashiersPage() {
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [search, setSearch]       = useState("");
+  const [profileModal, setProfileModal]         = useState<{ cashier: Cashier; settings: Record<string, unknown> | null } | null>(null);
+  const [profileLoading, setProfileLoading]     = useState(false);
+  const [copyModal, setCopyModal]               = useState<Cashier | null>(null);
+  const [copyTargets, setCopyTargets]           = useState<string[]>([]);
+  const [copyPlu, setCopyPlu]                   = useState(false);
+  const [copying, setCopying]                   = useState(false);
+  const [copyResult, setCopyResult]             = useState<{ ok: boolean; text: string } | null>(null);
+  const [editingCard, setEditingCard]           = useState<string | null>(null);
+  const [cardInput, setCardInput]               = useState("");
+  const [savingCard, setSavingCard]             = useState(false);
 
   const companyId = getCompanyId();
 
@@ -358,7 +407,7 @@ function CashiersPage() {
     setLoading(true);
     setFetchError(null);
     try {
-      const res = await apiRequest<Cashier[]>(`/cashiers?company_id=${companyId}`);
+      const res = await apiRequest<Cashier[]>(`/cashiers/${companyId}`);
       const list = (res.data ?? res) as unknown as Cashier[];
       setCashiers(Array.isArray(list) ? list : []);
     } catch {
@@ -375,8 +424,249 @@ function CashiersPage() {
     c.cashier_code.includes(search)
   );
 
+  async function viewProfile(cashier: Cashier) {
+    setProfileLoading(true);
+    setProfileModal({ cashier, settings: null });
+    try {
+      const data = await apiFetch<Record<string, unknown>>(
+        `/pos-settings/resolve?cashier_id=${cashier.id}&company_id=${companyId}`
+      );
+      setProfileModal({ cashier, settings: data });
+    } catch {
+      setProfileModal({ cashier, settings: null });
+    } finally {
+      setProfileLoading(false);
+    }
+  }
+
+  async function copyProfile() {
+    if (!copyModal || copyTargets.length === 0) return;
+    setCopying(true);
+    setCopyResult(null);
+    try {
+      const data = await apiFetch<{ success?: boolean; copied?: number; message?: string }>(
+        "/cashiers/copy-profile",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            source_cashier_id:  copyModal.id,
+            target_cashier_ids: copyTargets,
+            copy_settings:      true,
+            copy_plu:           copyPlu,
+          }),
+        }
+      );
+      if (data.success) {
+        setCopyResult({ ok: true,  text: `${data.copied} kasiyere kopyalandı ✓` });
+        setCopyTargets([]);
+      } else {
+        setCopyResult({ ok: false, text: data.message ?? "Kopyalama başarısız." });
+      }
+    } catch {
+      setCopyResult({ ok: false, text: "Sunucuya ulaşılamadı." });
+    } finally {
+      setCopying(false);
+    }
+  }
+
+  async function saveCard(cashierId: string) {
+    setSavingCard(true);
+    try {
+      await apiRequest(`/cashiers/${cashierId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ card_number: cardInput.trim() || null }),
+      });
+      setEditingCard(null);
+      setCardInput("");
+      await fetchCashiers();
+    } catch {
+      setFetchError("Kart bilgisi güncellenemedi.");
+    } finally {
+      setSavingCard(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
+      {profileModal && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9999,
+          background: "rgba(0,0,0,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{
+            background: "white", borderRadius: 14, padding: 24, width: 440,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
+              <div style={{ fontWeight: 600, fontSize: 15 }}>
+                {profileModal.cashier.full_name} — Profil
+              </div>
+              <button onClick={() => setProfileModal(null)}
+                style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#9E9E9E" }}>✕</button>
+            </div>
+
+            {profileLoading ? (
+              <div style={{ textAlign: "center", color: "#9ca3af", padding: "24px 0" }}>Yükleniyor...</div>
+            ) : profileModal.settings ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {[
+                  { label: "Kaynak",         value: String(profileModal.settings.source ?? "—") },
+                  { label: "Satır İsk.",     value: profileModal.settings.allow_line_discount ? `Açık (max %${profileModal.settings.max_line_discount_pct})` : "Kapalı" },
+                  { label: "Belge İsk.",     value: profileModal.settings.allow_doc_discount  ? `Açık (max %${profileModal.settings.max_doc_discount_pct})`  : "Kapalı" },
+                  { label: "PLU Izgara",     value: `${profileModal.settings.plu_cols ?? 4} × ${profileModal.settings.plu_rows ?? 3}` },
+                  { label: "PLU Modu",       value: profileModal.settings.plu_mode === "cashier" ? "Kasiyer Bazlı" : "Kasa Bazlı" },
+                ].map(row => (
+                  <div key={row.label} style={{
+                    display: "flex", justifyContent: "space-between",
+                    padding: "8px 12px", borderRadius: 8, background: "#F9FAFB",
+                  }}>
+                    <span style={{ fontSize: 13, color: "#6B7280" }}>{row.label}</span>
+                    <span style={{ fontSize: 13, fontWeight: 500, color: "#111" }}>{row.value}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", color: "#9ca3af", padding: "24px 0", fontSize: 13 }}>
+                Bu kasiyer için özel ayar yok — kasa/firma ayarı geçerli
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                setProfileModal(null);
+                setCopyModal(profileModal.cashier);
+                setCopyTargets([]);
+                setCopyResult(null);
+              }}
+              style={{
+                marginTop: 16, width: "100%", padding: "10px", borderRadius: 9,
+                background: "#EFF6FF", border: "1px solid #C7D7FD",
+                color: "#1D4ED8", cursor: "pointer", fontSize: 13, fontWeight: 600,
+              }}
+            >
+              Bu Profili Kopyala →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {copyModal && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9998,
+          background: "rgba(0,0,0,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{
+            background: "white", borderRadius: 14, padding: 24, width: 480,
+            maxHeight: "80vh", display: "flex", flexDirection: "column", gap: 16,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <div style={{ fontWeight: 600, fontSize: 15 }}>
+                "{copyModal.full_name}" profilini kopyala
+              </div>
+              <button onClick={() => { setCopyModal(null); setCopyResult(null); }}
+                style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#9E9E9E" }}>✕</button>
+            </div>
+
+            <div style={{ fontSize: 12, color: "#6B7280" }}>
+              Hedef kasiyerleri seç (birden fazla seçilebilir):
+            </div>
+
+            <div style={{ overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
+              {cashiers
+                .filter(c => c.id !== copyModal.id)
+                .map(c => {
+                  const isSelected = copyTargets.includes(c.id);
+                  return (
+                    <div
+                      key={c.id}
+                      onClick={() => setCopyTargets(prev =>
+                        isSelected ? prev.filter(id => id !== c.id) : [...prev, c.id]
+                      )}
+                      style={{
+                        padding: "10px 14px", borderRadius: 8, cursor: "pointer",
+                        border: `1.5px solid ${isSelected ? "#1D4ED8" : "#E5E7EB"}`,
+                        background: isSelected ? "#EFF6FF" : "white",
+                        display: "flex", alignItems: "center", gap: 8,
+                      }}
+                    >
+                      <span style={{
+                        width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+                        background: isSelected ? "#1D4ED8" : "white",
+                        border: `2px solid ${isSelected ? "#1D4ED8" : "#D1D5DB"}`,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                      }}>
+                        {isSelected && <span style={{ color: "white", fontSize: 10 }}>✓</span>}
+                      </span>
+                      <span style={{ fontSize: 13, color: isSelected ? "#1D4ED8" : "#374151", fontWeight: isSelected ? 600 : 400 }}>
+                        {c.full_name}
+                      </span>
+                      <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: "auto", fontFamily: "monospace" }}>
+                        {c.cashier_code}
+                      </span>
+                    </div>
+                  );
+                })}
+            </div>
+
+            <div style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "10px 0", borderTop: "1px solid #F0F0F0",
+            }}>
+              <input
+                type="checkbox"
+                id="copyPlu"
+                checked={copyPlu}
+                onChange={e => setCopyPlu(e.target.checked)}
+              />
+              <label htmlFor="copyPlu" style={{ fontSize: 13, color: "#374151", cursor: "pointer" }}>
+                PLU gruplarını da kopyala
+              </label>
+            </div>
+
+            {copyResult && (
+              <div style={{
+                padding: "10px 14px", borderRadius: 8, fontSize: 13,
+                background: copyResult.ok ? "#F0FDF4" : "#FEF2F2",
+                border: `1px solid ${copyResult.ok ? "#BBF7D0" : "#FECACA"}`,
+                color: copyResult.ok ? "#166534" : "#991B1B",
+              }}>
+                {copyResult.text}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={() => { setCopyModal(null); setCopyResult(null); }}
+                style={{
+                  flex: 1, padding: "11px", borderRadius: 9,
+                  border: "1px solid #E0E0E0", background: "white",
+                  cursor: "pointer", fontSize: 13, color: "#374151",
+                }}
+              >
+                İptal
+              </button>
+              <button
+                onClick={() => void copyProfile()}
+                disabled={copyTargets.length === 0 || copying}
+                style={{
+                  flex: 2, padding: "11px", borderRadius: 9, border: "none",
+                  background: copyTargets.length > 0 && !copying ? "#1D4ED8" : "#E5E7EB",
+                  color: copyTargets.length > 0 && !copying ? "white" : "#9ca3af",
+                  cursor: copyTargets.length > 0 && !copying ? "pointer" : "default",
+                  fontSize: 13, fontWeight: 600,
+                }}
+              >
+                {copying
+                  ? "Kopyalanıyor..."
+                  : copyTargets.length > 0
+                    ? `${copyTargets.length} kasiyere kopyala`
+                    : "Kasiyer seçin"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Başlık ── */}
       <div className="flex items-start justify-between">
@@ -496,6 +786,7 @@ function CashiersPage() {
                   <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Rol</th>
                   <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Durum</th>
                   <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Oluşturulma</th>
+                  <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">İşlem</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
@@ -517,12 +808,105 @@ function CashiersPage() {
                       <RoleBadge role={c.role} />
                     </td>
                     <td className="px-5 py-3.5">
-                      <StatusBadge active={c.is_active} />
+                      <div className="flex items-center gap-2">
+                        <StatusBadge active={c.is_active} />
+                        {c.card_number ? (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium bg-green-50 text-green-700 border border-green-200 rounded-full px-2 py-0.5">
+                            🏷️ Kart Atandı
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-gray-400 border border-gray-200 rounded-full px-2 py-0.5">
+                            Kart Yok
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-5 py-3.5 text-xs text-gray-400">
                       {new Date(c.created_at).toLocaleDateString("tr-TR", {
                         day: "2-digit", month: "short", year: "numeric",
                       })}
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => void viewProfile(c)}
+                          style={{
+                            fontSize: 11, padding: "4px 10px", borderRadius: 6,
+                            border: "1px solid #E0E0E0", background: "white",
+                            color: "#374151", cursor: "pointer",
+                          }}
+                        >
+                          Profil
+                        </button>
+                        <button
+                          onClick={() => { setCopyModal(c); setCopyResult(null); setCopyTargets([]); }}
+                          style={{
+                            fontSize: 11, padding: "4px 10px", borderRadius: 6,
+                            border: "1px solid #C7D7FD", background: "#EFF6FF",
+                            color: "#1D4ED8", cursor: "pointer",
+                          }}
+                        >
+                          Kopyala
+                        </button>
+                      </div>
+                      {editingCard === c.id ? (
+                        <div className="flex items-center gap-2 mt-2">
+                          <input
+                            autoFocus
+                            type="text"
+                            value={cardInput}
+                            onChange={(e) => setCardInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void saveCard(c.id);
+                              if (e.key === "Escape") {
+                                setEditingCard(null);
+                                setCardInput("");
+                              }
+                            }}
+                            placeholder="Barkod okutun..."
+                            className="flex-1 text-sm border border-blue-300 rounded px-2 py-1
+                              font-mono focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          />
+                          <button
+                            onClick={() => void saveCard(c.id)}
+                            disabled={savingCard}
+                            className="text-xs bg-blue-600 text-white px-3 py-1 rounded
+                              hover:bg-blue-700 disabled:opacity-50"
+                          >
+                            {savingCard ? "..." : "Kaydet"}
+                          </button>
+                          {c.card_number && (
+                            <button
+                              onClick={() => {
+                                setCardInput("");
+                                void saveCard(c.id);
+                              }}
+                              className="text-xs text-red-500 hover:text-red-700 px-2 py-1"
+                            >
+                              Kartı Kaldır
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              setEditingCard(null);
+                              setCardInput("");
+                            }}
+                            className="text-xs text-gray-400 hover:text-gray-600"
+                          >
+                            İptal
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setEditingCard(c.id);
+                            setCardInput(c.card_number ?? "");
+                          }}
+                          className="text-xs text-blue-600 hover:text-blue-800 mt-1"
+                        >
+                          {c.card_number ? "✏️ Kartı Düzenle" : "+ Kart Ata"}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}

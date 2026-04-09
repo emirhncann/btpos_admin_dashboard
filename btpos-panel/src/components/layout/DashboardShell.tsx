@@ -1,8 +1,16 @@
 "use client";
 
+import { useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
+
+const BRAND = {
+  sidebarBg: "#3A0B05",
+  activeBg: "#C21807",
+  accentBg: "#FF2A1A",
+  textMuted: "#F3C7C2",
+};
 
 interface NavItem {
   href: string;
@@ -138,30 +146,51 @@ const NAV_ITEMS: NavItem[] = [
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
   const pathname = usePathname();
+  const [collapsed, setCollapsed] = useState(false);
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
       {/* Sidebar */}
-      <aside className="w-64 bg-slate-900 text-white flex flex-col shrink-0">
+      <aside
+        className={`${collapsed ? "w-20" : "w-64"} text-white flex flex-col shrink-0 transition-all duration-200 overflow-hidden`}
+        style={{ background: BRAND.sidebarBg }}
+      >
         {/* Logo */}
-        <div className="px-6 py-5 border-b border-white/10">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shrink-0">
-              <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                  d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"
-                />
+        <div className={`${collapsed ? "px-3 py-4" : "px-6 py-5"} border-b border-white/10`}>
+          <div className={`relative flex items-center ${collapsed ? "justify-center" : "gap-3"}`}>
+            <div className="w-12 h-12  flex items-center justify-center shrink-0 overflow-hidden p-1">
+              <img
+                src="/branding/logo_icon_whitebg.png"
+                alt="BTPOS Logo"
+                className={`${collapsed ? "w-8 h-8" : "w-10 h-10"} object-contain`}
+              />
+            </div>
+            {!collapsed && (
+              <div>
+                <p className="text-sm font-bold">BTPOS</p>
+                <p className="text-xs" style={{ color: BRAND.textMuted }}>Yönetici Konsolu</p>
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => setCollapsed((v) => !v)}
+              className={`${collapsed ? "absolute -right-0.5 -bottom-1" : "ml-auto"} text-slate-300 hover:text-white p-1 rounded hover:bg-white/10`}
+              aria-label={collapsed ? "Sidebar aç" : "Sidebar kapat"}
+              title={collapsed ? "Aç" : "Kapat"}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {collapsed ? (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                ) : (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                )}
               </svg>
-            </div>
-            <div>
-              <p className="text-sm font-bold">BTPOS</p>
-              <p className="text-xs text-slate-400">Yönetici Konsolu</p>
-            </div>
+            </button>
           </div>
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
+        <nav className={`${collapsed ? "px-2" : "px-3"} py-4 space-y-1 overflow-y-auto`}>
           {NAV_ITEMS.map((item) => {
             const isActive =
               item.href === "/dashboard"
@@ -172,30 +201,38 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
               <Link
                 key={item.href}
                 href={item.href}
-                className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                title={collapsed ? item.label : undefined}
+                className={`flex items-center ${collapsed ? "justify-center w-10 h-10 mx-auto px-0 py-0" : "gap-3 px-3 py-2"} rounded-lg text-sm transition-colors ${
                   isActive
-                    ? "bg-blue-600 text-white"
+                    ? "text-white"
                     : "text-slate-400 hover:bg-white/5 hover:text-white"
                 }`}
+                style={isActive ? { background: BRAND.activeBg } : undefined}
               >
                 {item.icon}
-                {item.label}
+                {!collapsed && item.label}
               </Link>
             );
           })}
         </nav>
 
         {/* Kullanıcı */}
-        <div className="px-3 py-4 border-t border-white/10">
-          <div className="flex items-center gap-3 px-3 py-2 rounded-lg">
-            <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-xs font-bold uppercase shrink-0">
+        <div className={`${collapsed ? "px-2" : "px-3"} py-4 border-t border-white/10`}>
+          <div className={`flex ${collapsed ? "flex-col items-center gap-2" : "items-center gap-3"} px-3 py-2 rounded-lg`}>
+            <div
+              className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold uppercase shrink-0"
+              style={{ background: BRAND.accentBg }}
+            >
               {user?.name?.charAt(0) ?? "A"}
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">{user?.name ?? "Admin"}</p>
-              <p className="text-xs text-slate-400 truncate">{user?.email ?? ""}</p>
-            </div>
+            {!collapsed && (
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate">{user?.name ?? "Admin"}</p>
+                <p className="text-xs truncate" style={{ color: BRAND.textMuted }}>{user?.email ?? ""}</p>
+              </div>
+            )}
             <button
+              type="button"
               onClick={logout}
               title="Çıkış Yap"
               className="text-slate-500 hover:text-red-400 transition shrink-0"
@@ -212,7 +249,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
       {/* İçerik */}
       <main className="flex-1 overflow-y-auto">
-        <div className="p-8">{children}</div>
+        <div className="p-8" style={{ background: "#F8FAFC", minHeight: "100%" }}>{children}</div>
       </main>
     </div>
   );

@@ -1,39 +1,43 @@
 "use client";
 
-import {
-  useEffect,
-  useState,
-  useCallback,
-  useRef,
-  type DragEvent,
-} from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { withAuth } from "@/components/withAuth";
 import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
 const PRESET_COLORS = [
-  "#E53935", "#D81B60", "#8E24AA", "#5E35B1",
-  "#1E88E5", "#039BE5", "#00ACC1", "#00897B",
-  "#43A047", "#7CB342", "#C0CA33", "#F9A825",
-  "#FB8C00", "#F4511E", "#6D4C41", "#546E7A",
+  "#E53935","#D81B60","#8E24AA","#5E35B1",
+  "#1E88E5","#039BE5","#00ACC1","#00897B",
+  "#43A047","#7CB342","#C0CA33","#F9A825",
+  "#FB8C00","#F4511E","#6D4C41","#546E7A",
 ];
-
-const GROUP_ROW_TINT  = "40";
-const ITEM_BORDER_TINT = "70";
-const SEARCH_LIMIT    = 20;
+const SEARCH_LIMIT = 20;
 
 interface Workplace { id: string; name: string }
 interface Terminal  { id: string; terminal_name: string; workplace_id?: string; is_installed: boolean }
+interface Cashier   { id: string; full_name: string; cashier_code: string }
 interface PluItem   { id: string; product_code: string; sort_order: number }
 interface PluGroup  { id: string; name: string; color: string; sort_order: number; is_active: boolean; plu_items: PluItem[] }
 interface ErpProduct { id: string; name: string; code: string; barcode?: string; salesPriceTaxIncluded?: number }
-interface PosSettings { plu_cols?: number; plu_rows?: number; font_size_name?: number; font_size_price?: number; font_size_code?: number; show_price?: boolean; show_code?: boolean }
+interface ImportExportItem { product_code: string; sort_order: number }
+interface ImportExportGroup {
+  name: string;
+  color: string;
+  sort_order: number;
+  items: ImportExportItem[];
+}
 
-type Scope = "company" | "workplace" | "terminal";
+type NodeType = "workplace" | "terminal" | "cashier";
+interface TreeNode {
+  type: NodeType;
+  id: string;
+  label: string;
+  parentId?: string;
+  workplaceId?: string;
+}
 
 function getCompanyId(): string {
-  if (typeof window === "undefined") return "";
   try {
     const raw = localStorage.getItem(USER_KEY);
     if (!raw) return "";
@@ -55,111 +59,142 @@ async function apiFetch(endpoint: string, options: RequestInit = {}) {
   return res.json();
 }
 
+function toImportExportGroups(raw: unknown): ImportExportGroup[] {
+  const arr = Array.isArray(raw) ? raw : [];
+  return arr.map((g, idx) => {
+    const rec = g as Record<string, unknown>;
+    const name = String(rec.name ?? `Grup ${idx + 1}`);
+    const color = String(rec.color ?? "#1E88E5");
+    const sortOrder = Number(rec.sort_order ?? idx);
+    const itemSource = Array.isArray(rec.items)
+      ? rec.items
+      : Array.isArray(rec.plu_items)
+        ? rec.plu_items
+        : [];
+    const items = itemSource.map((it, itemIdx) => {
+      const r = it as Record<string, unknown>;
+      const productCode = String(
+        r.product_code ?? r.productCode ?? r.code ?? r.Code ?? ""
+      );
+      return {
+        product_code: productCode,
+        sort_order: Number(r.sort_order ?? r.sortOrder ?? itemIdx),
+      };
+    }).filter((it) => it.product_code.length > 0);
+    return { name, color, sort_order: sortOrder, items };
+  });
+}
+
 function hexToSoft(hex: string): string {
   try {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r},${g},${b},0.13)`;
+    const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+    return `rgba(${r},${g},${b},0.12)`;
   } catch { return "#E3F2FD"; }
 }
 
-function ColorPicker({ selected, onSelect, size = 16 }: { selected: string; onSelect: (c: string) => void; size?: number }) {
+function ColorPicker({ selected, onSelect }: { selected: string; onSelect: (c: string) => void }) {
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
       {PRESET_COLORS.map(c => (
         <button key={c} type="button" onClick={() => onSelect(c)} style={{
-          width: size, height: size, background: c, borderRadius: 3, cursor: "pointer",
-          border: selected === c ? "2px solid #111" : "1px solid rgba(0,0,0,0.12)",
+          width: 16, height: 16, background: c, borderRadius: 3, cursor: "pointer",
+          border: selected === c ? "2px solid #111" : "1px solid rgba(0,0,0,0.1)",
         }} />
       ))}
     </div>
   );
 }
 
-// ── PLU Grid Önizleme ─────────────────────────────────────────────────────────
-function PluGridPreview({
-  groups, activeGroupId, settings, allProducts,
+// ── Sürükle Bırak Grup Listesi ────────────────────────────────────────────────
+function DraggableGroupList({
+  groups,
+  activeId,
+  selectedIds,
+  onSelect,
+  onToggleSelect,
+  onDelete,
+  onReorder,
 }: {
   groups: PluGroup[];
-  activeGroupId: string | null;
-  settings: PosSettings;
-  allProducts: { code: string; name: string; price: number }[];
+  activeId: string | null;
+  selectedIds: string[];
+  onSelect: (g: PluGroup) => void;
+  onToggleSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+  onReorder: (groups: PluGroup[]) => void;
 }) {
-  const cols = settings.plu_cols ?? 4;
-  const rows = settings.plu_rows ?? 3;
-  const total = cols * rows;
-  const fsName  = settings.font_size_name  ?? 12;
-  const fsPrice = settings.font_size_price ?? 13;
-  const fsCode  = settings.font_size_code  ?? 9;
+  const [list, setList] = useState(groups);
+  const dragIdx = useRef<number | null>(null);
 
-  const activeGroup = groups.find(g => g.id === activeGroupId) ?? groups[0];
-  if (!activeGroup) return (
-    <div style={{ textAlign: "center", color: "#9ca3af", padding: "32px 0", fontSize: 13 }}>
-      Önizleme için grup seçin
+  useEffect(() => { setList(groups); }, [groups]);
+
+  function onDragStart(idx: number) { dragIdx.current = idx; }
+  function onDragOver(e: React.DragEvent, idx: number) {
+    e.preventDefault();
+    if (dragIdx.current === null || dragIdx.current === idx) return;
+    const next = [...list];
+    const [moved] = next.splice(dragIdx.current, 1);
+    next.splice(idx, 0, moved);
+    dragIdx.current = idx;
+    setList(next);
+  }
+  function onDrop() {
+    dragIdx.current = null;
+    const updated = list.map((g, i) => ({ ...g, sort_order: i }));
+    setList(updated);
+    onReorder(updated);
+  }
+
+  if (list.length === 0) return (
+    <div style={{ textAlign:"center", color:"#9ca3af", padding:"32px 0", fontSize:12 }}>
+      Henüz grup yok
     </div>
   );
 
-  const color = activeGroup.color;
-  const soft  = hexToSoft(color);
-  const items = [...(activeGroup.plu_items ?? [])].sort((a, b) => a.sort_order - b.sort_order);
-
   return (
-    <div>
-      <div style={{ fontSize: 10, fontWeight: 600, color: "#9ca3af",
-        textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>
-        Kasa Önizleme — {cols}×{rows} · {activeGroup.name}
-      </div>
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-        gridTemplateRows:    `repeat(${rows}, minmax(52px, 1fr))`,
-        gap: 5,
-        background: "#F8F9FA",
-        borderRadius: 10,
-        padding: 8,
-        border: "1px solid #E5E7EB",
-      }}>
-        {Array.from({ length: total }).map((_, i) => {
-          const item = items[i];
-          const prod = item ? allProducts.find(p => p.code === item.product_code) : null;
-          const name = prod?.name ?? item?.product_code ?? "";
-          const price = prod?.price ?? 0;
-
-          return (
-            <div key={i} style={{
-              borderRadius: 8,
-              background: item ? soft : "#F3F4F6",
-              border: `1.5px solid ${item ? "transparent" : "#E5E7EB"}`,
-              display: "flex", flexDirection: "column",
-              alignItems: "center", justifyContent: "center",
-              gap: 2, padding: "5px 4px", minHeight: 52, overflow: "hidden",
-              cursor: item ? "pointer" : "default",
-            }}>
-              {item ? (
-                <>
-                  <div style={{ fontSize: fsName, fontWeight: 600, color: "#374151",
-                    textAlign: "center", lineHeight: 1.2, wordBreak: "break-word",
-                    width: "100%", overflow: "hidden", textOverflow: "ellipsis",
-                    whiteSpace: "nowrap" }}>{name || item.product_code}</div>
-                  {settings.show_code !== false && (
-                    <div style={{ fontSize: fsCode, color: "#9ca3af", fontFamily: "monospace" }}>
-                      {item.product_code}
-                    </div>
-                  )}
-                  {settings.show_price !== false && price > 0 && (
-                    <div style={{ fontSize: fsPrice, fontWeight: 700, color }}>
-                      {price.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} ₺
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div style={{ fontSize: 10, color: "#D1D5DB" }}>—</div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+    <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+      {list.map((g, idx) => {
+        const isActive = g.id === activeId;
+        return (
+          <div key={g.id}
+            draggable
+            onDragStart={() => onDragStart(idx)}
+            onDragOver={e => onDragOver(e, idx)}
+            onDrop={onDrop}
+            onClick={() => onSelect(g)}
+            style={{
+              display:"flex", alignItems:"center", gap:8,
+              padding:"8px 10px", borderRadius:7, cursor:"pointer",
+              background: isActive ? hexToSoft(g.color) : "white",
+              border: `1px solid ${isActive ? g.color : "#F0F0F0"}`,
+              borderLeft: `3px solid ${isActive ? g.color : "transparent"}`,
+              userSelect: "none",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={selectedIds.includes(g.id)}
+              onChange={e => { e.stopPropagation(); onToggleSelect(g.id); }}
+              onClick={e => e.stopPropagation()}
+              style={{ width:14, height:14, flexShrink:0, cursor:"pointer", accentColor:"#1D4ED8" }}
+              title="Toplu sil için seç"
+            />
+            <span style={{ color:"#D1D5DB", fontSize:13, flexShrink:0, cursor:"grab" }}>⠿</span>
+            <span style={{ width:10, height:10, borderRadius:2, background:g.color, flexShrink:0 }} />
+            <span style={{ fontSize:12, fontWeight: isActive ? 600 : 400,
+              color:"#374151", flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+              {g.name}
+            </span>
+            <span style={{ fontSize:10, color:"#9ca3af", flexShrink:0 }}>
+              {g.plu_items?.length ?? 0}
+            </span>
+            <button
+              onClick={e => { e.stopPropagation(); onDelete(g.id); }}
+              style={{ background:"none", border:"none", cursor:"pointer",
+                color:"#D1D5DB", fontSize:12, padding:"0 2px", flexShrink:0 }}>✕</button>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -171,7 +206,7 @@ function DraggableItemList({
   items: PluItem[];
   groupColor: string;
   onDelete: (id: string, code: string) => void;
-  onReorder: (newItems: PluItem[]) => void;
+  onReorder: (items: PluItem[]) => void;
 }) {
   const [list, setList] = useState(items);
   const dragIdx = useRef<number | null>(null);
@@ -179,8 +214,7 @@ function DraggableItemList({
   useEffect(() => { setList(items); }, [items]);
 
   function onDragStart(idx: number) { dragIdx.current = idx; }
-
-  function onDragOver(e: DragEvent, idx: number) {
+  function onDragOver(e: React.DragEvent, idx: number) {
     e.preventDefault();
     if (dragIdx.current === null || dragIdx.current === idx) return;
     const next = [...list];
@@ -189,57 +223,47 @@ function DraggableItemList({
     dragIdx.current = idx;
     setList(next);
   }
-
   function onDrop() {
     dragIdx.current = null;
-    // sort_order'ları güncelle
     const updated = list.map((item, i) => ({ ...item, sort_order: i }));
     setList(updated);
     onReorder(updated);
   }
 
   if (list.length === 0) return (
-    <div style={{ textAlign: "center", color: "#9ca3af", padding: "48px 0", fontSize: 13 }}>
-      Bu grupta henüz ürün kodu yok.
+    <div style={{ textAlign:"center", color:"#9ca3af", padding:"32px 0", fontSize:12 }}>
+      Bu grupta henüz ürün kodu yok
     </div>
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+    <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
       {list.map((item, idx) => (
-        <div
-          key={item.id}
+        <div key={item.id}
           draggable
           onDragStart={() => onDragStart(idx)}
           onDragOver={e => onDragOver(e, idx)}
           onDrop={onDrop}
           style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            background: "white", borderRadius: 8, padding: "8px 14px",
-            border: `1px solid ${groupColor + ITEM_BORDER_TINT}`,
-            borderLeft: `3px solid ${groupColor}`,
-            cursor: "grab", userSelect: "none",
+            display:"flex", alignItems:"center", justifyContent:"space-between",
+            padding:"7px 12px", borderRadius:7, background:"white",
+            border:`1px solid ${groupColor}22`,
+            borderLeft:`3px solid ${groupColor}`,
+            cursor:"grab", userSelect:"none",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {/* Sürükle ikonu */}
-            <div style={{ color: "#D1D5DB", fontSize: 14, cursor: "grab", flexShrink: 0 }}>⠿</div>
-            <span style={{ fontSize: 10, color: "#D1D5DB", width: 18, textAlign: "right", flexShrink: 0 }}>
-              {idx + 1}
-            </span>
-            <span style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 500, color: "#374151" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ color:"#D1D5DB", fontSize:13 }}>⠿</span>
+            <span style={{ fontSize:10, color:"#D1D5DB", width:18, textAlign:"right" }}>{idx+1}</span>
+            <span style={{ fontSize:12, fontFamily:"monospace", fontWeight:500, color:"#374151" }}>
               {item.product_code}
             </span>
           </div>
-          <button
-            type="button"
-            onClick={() => onDelete(item.id, item.product_code)}
-            style={{
-              fontSize: 11, fontWeight: 500, color: "#EF4444",
-              background: "#FEF2F2", border: "1px solid #FECACA",
-              borderRadius: 6, padding: "4px 10px", cursor: "pointer",
-            }}
-          >Kaldır</button>
+          <button onClick={() => onDelete(item.id, item.product_code)}
+            style={{ fontSize:11, color:"#EF4444", background:"#FEF2F2",
+              border:"1px solid #FECACA", borderRadius:5, padding:"3px 8px", cursor:"pointer" }}>
+            Kaldır
+          </button>
         </div>
       ))}
     </div>
@@ -250,122 +274,240 @@ function DraggableItemList({
 function PluPage() {
   const companyId = getCompanyId();
 
-  const [scope,      setScope]      = useState<Scope>("company");
+  // Ağaç verisi
   const [workplaces, setWorkplaces] = useState<Workplace[]>([]);
   const [terminals,  setTerminals]  = useState<Terminal[]>([]);
-  const [activeWp,   setActiveWp]   = useState<Workplace | null>(null);
-  const [activeTerm, setActiveTerm] = useState<Terminal | null>(null);
-  const [posSettings, setPosSettings] = useState<PosSettings>({});
-  const [allProducts, setAllProducts] = useState<{ code: string; name: string; price: number }[]>([]);
+  const [cashiers,   setCashiers]   = useState<Cashier[]>([]);
 
+  // Seçili düğüm
+  const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
+
+  // İşyeri ekleme
   const [showWpForm, setShowWpForm] = useState(false);
-  const [wpName,    setWpName]      = useState("");
-  const [wpAddress, setWpAddress]   = useState("");
-  const [wpPhone,   setWpPhone]     = useState("");
-  const [savingWp,  setSavingWp]    = useState(false);
+  const [wpName,     setWpName]     = useState("");
+  const [savingWp,   setSavingWp]   = useState(false);
 
+  // PLU grupları
   const [groups,      setGroups]      = useState<PluGroup[]>([]);
   const [activeGroup, setActiveGroup] = useState<PluGroup | null>(null);
   const [loading,     setLoading]     = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [deletingBulk, setDeletingBulk] = useState(false);
 
-  const [showGroupForm,  setShowGroupForm]  = useState(false);
-  const [newGroupName,   setNewGroupName]   = useState("");
-  const [newGroupColor,  setNewGroupColor]  = useState(PRESET_COLORS[4]);
-  const [addingGroup,    setAddingGroup]    = useState(false);
+  // Grup ekleme
+  const [showGroupForm, setShowGroupForm] = useState(false);
+  const [newGroupName,  setNewGroupName]  = useState("");
+  const [newGroupColor, setNewGroupColor] = useState(PRESET_COLORS[4]);
+  const [addingGroup,   setAddingGroup]   = useState(false);
 
-  const [newCode,     setNewCode]     = useState("");
-  const [addingItem,  setAddingItem]  = useState(false);
-  const [itemError,   setItemError]   = useState("");
+  // Item ekleme
+  const [newCode,      setNewCode]      = useState("");
+  const [addingItem,   setAddingItem]   = useState(false);
+  const [itemError,    setItemError]    = useState("");
   const [addItemModal, setAddItemModal] = useState(false);
 
-  const [productSearch,  setProductSearch]  = useState("");
-  const [searchResults,  setSearchResults]  = useState<ErpProduct[]>([]);
-  const [searchLoading,  setSearchLoading]  = useState(false);
-  const [searchPage,     setSearchPage]     = useState(1);
-  const [searchTotal,    setSearchTotal]    = useState(0);
+  // Ürün arama
+  const [productSearch, setProductSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<ErpProduct[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchPage,    setSearchPage]    = useState(1);
+  const [searchTotal,   setSearchTotal]   = useState(0);
 
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<{
-    ok: boolean;
-    text: string;
-    detail?: string;
-  } | null>(null);
+  // Çakışma uyarısı
+  const [showConflictWarning, setShowConflictWarning] = useState(false);
+
+  // Export/Import
+  const [importing,    setImporting]    = useState(false);
+  const [importResult, setImportResult] = useState<{ ok: boolean; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Yükleyiciler
-  const loadWorkplaces = useCallback(async () => {
+  const loadAll = useCallback(async () => {
     if (!companyId) return;
-    const data = await apiFetch(`/workplaces/${companyId}`);
-    const list: Workplace[] = Array.isArray(data) ? data : [];
-    setWorkplaces(list);
-    if (list.length > 0 && !activeWp) setActiveWp(list[0]);
-  }, [companyId, activeWp]);
-
-  const loadTerminals = useCallback(async () => {
-    if (!companyId) return;
-    const data = await apiFetch(`/management/licenses/terminals/${companyId}`);
-    const list: Terminal[] = Array.isArray(data) ? (data as Terminal[]).filter(t => t.is_installed) : [];
-    setTerminals(list);
+    const [wpData, termData, cashierData] = await Promise.all([
+      apiFetch(`/workplaces/${companyId}`),
+      apiFetch(`/management/licenses/terminals/${companyId}`),
+      apiFetch(`/cashiers/${companyId}`),
+    ]);
+    setWorkplaces(Array.isArray(wpData)      ? wpData      : []);
+    setTerminals( Array.isArray(termData)    ? (termData as Terminal[]).filter(t => t.is_installed) : []);
+    setCashiers(  Array.isArray(cashierData) ? cashierData : []);
   }, [companyId]);
 
-  const loadPosSettings = useCallback(async (terminalId: string) => {
-    try {
-      const d = await apiFetch(
-        `/pos-settings/resolve?company_id=${companyId}&terminal_id=${terminalId}`
-      ) as PosSettings;
-      setPosSettings(d);
-    } catch { setPosSettings({}); }
-  }, [companyId]);
+  useEffect(() => { void loadAll(); }, [loadAll]);
 
-  const loadGroups = useCallback(async (workplaceId: string | null) => {
+  // PLU gruplarını yükle
+  const loadGroups = useCallback(async (node: TreeNode) => {
     setLoading(true);
     setActiveGroup(null);
     try {
-      const url = workplaceId
-        ? `/plu/groups/${companyId}?workplace_id=${workplaceId}`
-        : `/plu/groups/${companyId}`;
-      const data = await apiFetch(url);
+      const params = new URLSearchParams();
+      if (node.type === "terminal") params.append("terminal_id", node.id);
+      else if (node.type === "cashier") params.append("cashier_id", node.id);
+
+      const data = await apiFetch(`/plu/groups/${companyId}?${params.toString()}`);
       const list: PluGroup[] = Array.isArray(data) ? data : [];
       setGroups(list);
+      setSelectedGroupIds([]);
       if (list.length > 0) setActiveGroup(list[0]);
     } finally { setLoading(false); }
   }, [companyId]);
 
-  // Ürün listesini yükle (önizleme için)
-  const loadProducts = useCallback(async () => {
-    if (!companyId) return;
-    try {
-      const data = await apiFetch(`/integration/products/${companyId}`) as { data?: { data?: unknown[] } };
-      const raw = data?.data?.data ?? [];
-      setAllProducts(raw.map((p: unknown) => {
-        const pr = p as Record<string, unknown>;
-        return {
-          code:  String(pr.code  ?? ""),
-          name:  String(pr.name  ?? ""),
-          price: Number(pr.salesPriceTaxIncluded ?? 0),
-        };
-      }));
-    } catch { setAllProducts([]); }
-  }, [companyId]);
-
   useEffect(() => {
-    void loadWorkplaces();
-    void loadTerminals();
-    void loadProducts();
-  }, [loadWorkplaces, loadTerminals, loadProducts]);
-
-  useEffect(() => {
-    if (scope === "company") { loadGroups(null); setPosSettings({}); }
-    else if (scope === "workplace" && activeWp) { loadGroups(activeWp.id); setPosSettings({}); }
-    else if (scope === "terminal" && activeTerm) {
-      const wp = workplaces.find(w => w.id === activeTerm.workplace_id);
-      loadGroups(wp?.id ?? null);
-      loadPosSettings(activeTerm.id);
+    if (selectedNode && selectedNode.type !== "workplace") {
+      void loadGroups(selectedNode);
+    } else {
+      setGroups([]); setActiveGroup(null);
     }
-    else setGroups([]);
-  }, [scope, activeWp, activeTerm, loadGroups, loadPosSettings, workplaces]);
+  }, [selectedNode, loadGroups]);
 
+  const reloadGroups = useCallback(() => {
+    if (selectedNode && selectedNode.type !== "workplace") void loadGroups(selectedNode);
+  }, [selectedNode, loadGroups]);
+
+  // Çakışma kontrolü — grup eklemeden önce mevcut grupları sil mi?
+  async function checkConflictAndAdd() {
+    if (!selectedNode || !newGroupName.trim()) return;
+
+    // Mevcut grupta aynı isimde var mı?
+    const exists = groups.some(g => g.name.toLowerCase() === newGroupName.trim().toLowerCase());
+    if (exists) {
+      // Çakışma uyarısı göster
+      setShowConflictWarning(true);
+    } else {
+      await doAddGroup();
+    }
+  }
+
+  async function doAddGroup(deleteExisting = false) {
+    if (!selectedNode || !newGroupName.trim()) return;
+    setAddingGroup(true);
+    try {
+      // Eğer üstüne yaz seçildiyse önce aynı isimli grubu sil
+      if (deleteExisting) {
+        const existing = groups.find(g =>
+          g.name.toLowerCase() === newGroupName.trim().toLowerCase()
+        );
+        if (existing) {
+          // İçindeki item'ları sil
+          for (const item of existing.plu_items ?? []) {
+            await apiFetch(`/plu/items/${item.id}`, { method: "DELETE" });
+          }
+          // Grubu sil
+          await apiFetch(`/plu/groups/${existing.id}`, { method: "DELETE" });
+        }
+      }
+
+      const body: Record<string, unknown> = {
+        company_id: companyId,
+        name:       newGroupName.trim(),
+        color:      newGroupColor,
+      };
+      if (selectedNode.type === "terminal") body.terminal_id = selectedNode.id;
+      if (selectedNode.type === "cashier")  body.cashier_id  = selectedNode.id;
+
+      await apiFetch("/plu/groups", { method: "POST", body: JSON.stringify(body) });
+      setNewGroupName(""); setShowGroupForm(false); setShowConflictWarning(false);
+      await reloadGroups();
+    } finally { setAddingGroup(false); }
+  }
+
+  const deleteGroup = async (id: string) => {
+    if (!confirm("Bu grup ve içindeki tüm ürün kodları silinecek. Emin misiniz?")) return;
+    await apiFetch(`/plu/groups/${id}`, { method: "DELETE" });
+    if (activeGroup?.id === id) setActiveGroup(null);
+    setSelectedGroupIds(prev => prev.filter(x => x !== id));
+    await reloadGroups();
+  };
+
+  useEffect(() => {
+    setSelectedGroupIds(prev => prev.filter(id => groups.some(g => g.id === id)));
+  }, [groups]);
+
+  const toggleGroupSelection = useCallback((id: string) => {
+    setSelectedGroupIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  }, []);
+
+  const deleteSelectedGroups = async () => {
+    if (selectedGroupIds.length === 0) return;
+    if (!confirm(`Seçilen ${selectedGroupIds.length} grup ve içindeki tüm ürün kodları silinecek. Emin misiniz?`)) return;
+    setDeletingBulk(true);
+    try {
+      for (const id of selectedGroupIds) {
+        await apiFetch(`/plu/groups/${id}`, { method: "DELETE" });
+      }
+      if (activeGroup && selectedGroupIds.includes(activeGroup.id)) setActiveGroup(null);
+      setSelectedGroupIds([]);
+      await reloadGroups();
+    } finally {
+      setDeletingBulk(false);
+    }
+  };
+
+  const updateGroupColor = async (groupId: string, color: string) => {
+    await apiFetch(`/plu/groups/${groupId}`, { method: "PATCH", body: JSON.stringify({ color }) });
+    await reloadGroups();
+  };
+
+  // Grup sıralama
+  const handleGroupReorder = async (newGroups: PluGroup[]) => {
+    setGroups(newGroups);
+    try {
+      await apiFetch("/plu/groups/reorder", {
+        method: "PATCH",
+        body: JSON.stringify({
+          items: newGroups.map((g, i) => ({ id: g.id, sort_order: i })),
+        }),
+      });
+    } catch (e) { console.error("Grup sıralama hatası:", e); }
+  };
+
+  // Item işlemleri
+  const addItem = async (productCode: string) => {
+    if (!activeGroup || !productCode.trim()) return;
+    setAddingItem(true); setItemError("");
+    try {
+      const body: Record<string, unknown> = {
+        group_id:     activeGroup.id,
+        company_id:   companyId,
+        product_code: productCode.trim(),
+      };
+      if (selectedNode?.type === "terminal") body.terminal_id = selectedNode.id;
+      if (selectedNode?.type === "cashier")  body.cashier_id  = selectedNode.id;
+
+      const data = await apiFetch("/plu/items", { method: "POST", body: JSON.stringify(body) });
+      if ((data as { success?: boolean; message?: string }).success === false) {
+        setItemError((data as { message?: string }).message ?? "Hata."); return;
+      }
+      setNewCode(""); await reloadGroups();
+    } finally { setAddingItem(false); }
+  };
+
+  const deleteItem = async (itemId: string, code: string) => {
+    if (!confirm(`"${code}" kodlu ürün bu gruptan kaldırılsın mı?`)) return;
+    await apiFetch(`/plu/items/${itemId}`, { method: "DELETE" });
+    await reloadGroups();
+  };
+
+  // Item sıralama
+  const handleItemReorder = async (newItems: PluItem[]) => {
+    setGroups(prev => prev.map(g =>
+      g.id === activeGroup?.id ? { ...g, plu_items: newItems } : g
+    ));
+    setActiveGroup(prev => prev ? { ...prev, plu_items: newItems } : prev);
+    try {
+      await Promise.all(newItems.map(item =>
+        apiFetch(`/plu/items/${item.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ sort_order: item.sort_order }),
+        })
+      ));
+    } catch (e) { console.error("Item sıralama hatası:", e); }
+  };
+
+  // Ürün arama
   const searchProducts = useCallback(async (q: string, page = 1) => {
     if (q.length < 2) { setSearchResults([]); setSearchTotal(0); return; }
     setSearchLoading(true);
@@ -386,218 +528,85 @@ function PluPage() {
     return () => clearTimeout(t);
   }, [productSearch, searchProducts]);
 
-  const currentWorkplaceId = scope === "workplace" ? (activeWp?.id ?? null)
-    : scope === "terminal" ? (workplaces.find(w => w.id === activeTerm?.workplace_id)?.id ?? null)
-    : null;
-
-  const reloadGroups = useCallback(() => loadGroups(currentWorkplaceId ?? null), [loadGroups, currentWorkplaceId]);
-
+  // Export
   async function exportPlu() {
-    if (!companyId) return;
-    setImportResult(null);
-    try {
-      const wpId =
-        scope === "workplace"
-          ? activeWp?.id
-          : scope === "terminal"
-            ? workplaces.find((w) => w.id === activeTerm?.workplace_id)?.id
-            : undefined;
+    if (!selectedNode || selectedNode.type === "workplace") return;
+    const params = new URLSearchParams();
+    if (selectedNode.type === "terminal") params.append("terminal_id", selectedNode.id);
+    if (selectedNode.type === "cashier")  params.append("cashier_id",  selectedNode.id);
 
-      const url = wpId
-        ? `${API_URL}/plu/export/${companyId}?workplace_id=${wpId}`
-        : `${API_URL}/plu/export/${companyId}`;
-
-      const res = await fetch(url, { headers: authHeaders() as Record<string, string> });
-      if (!res.ok) {
-        setImportResult({
-          ok: false,
-          text: `Dışa aktarma başarısız (${res.status}).`,
-        });
-        return;
-      }
-      const data = await res.json();
-
-      const wpLabel = wpId ? workplaces.find((w) => w.id === wpId)?.name ?? "isyeri" : "sirket";
-      const safeLabel = String(wpLabel).replace(/[/\\?%*:|"<>]/g, "_").replace(/\s+/g, "_");
-      const date = new Date().toISOString().slice(0, 10);
-      const fileName = `plu_${safeLabel}_${date}.json`;
-
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = fileName;
-      link.click();
-      URL.revokeObjectURL(link.href);
-    } catch (e) {
-      setImportResult({ ok: false, text: `Dışa aktarma hatası: ${String(e)}` });
-    }
+    const res  = await fetch(`${API_URL}/plu/export/${companyId}?${params}`, {
+      headers: authHeaders() as Record<string, string>,
+    });
+    const data = await res.json();
+    const date = new Date().toISOString().slice(0, 10);
+    const name = `plu_${selectedNode.label.replace(/\s+/g, "_")}_${date}.json`;
+    const parsed = data as Record<string, unknown>;
+    const groups = toImportExportGroups(Array.isArray(parsed.groups) ? parsed.groups : data);
+    const exportPayload = {
+      version: "1.0",
+      exported_at: new Date().toISOString(),
+      source: selectedNode.type,
+      group_count: groups.length,
+      groups,
+    };
+    const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(link.href);
   }
 
+  // Import
   async function importPlu(file: File) {
-    if (!companyId) return;
-    setImporting(true);
-    setImportResult(null);
+    if (!selectedNode || selectedNode.type === "workplace") return;
+    setImporting(true); setImportResult(null);
     try {
       const text = await file.text();
-      const json = JSON.parse(text) as unknown;
-
-      const groupsParsed = Array.isArray(json) ? json : (json as { groups?: unknown }).groups ?? [];
-      const groups = Array.isArray(groupsParsed) ? groupsParsed : [];
-
+      const json = JSON.parse(text) as Record<string, unknown>;
+      const rawGroups = Array.isArray(json)
+        ? (json as unknown[])
+        : Array.isArray((json as Record<string, unknown>).groups)
+          ? ((json as Record<string, unknown>).groups as unknown[])
+          : [];
+      const groups = toImportExportGroups(rawGroups);
       if (groups.length === 0) {
-        setImportResult({
-          ok: false,
-          text: "Geçersiz dosya formatı. 'groups' dizisi bulunamadı.",
-        });
+        setImportResult({ ok: false, text: "Geçersiz dosya formatı veya grup bulunamadı." });
         return;
       }
-
-      const wpId =
-        scope === "workplace"
-          ? activeWp?.id
-          : scope === "terminal"
-            ? workplaces.find((w) => w.id === activeTerm?.workplace_id)?.id
-            : null;
-
       const body: Record<string, unknown> = { groups };
-      if (wpId) body.workplace_id = wpId;
+      if (selectedNode.type === "terminal") body.terminal_id = selectedNode.id;
+      if (selectedNode.type === "cashier")  body.cashier_id  = selectedNode.id;
 
-      const res = await fetch(`${API_URL}/plu/import/${companyId}`, {
-        method: "POST",
-        headers: authHeaders() as Record<string, string>,
-        body: JSON.stringify(body),
-      });
-      const data = (await res.json()) as {
-        success?: boolean;
-        imported?: number;
-        total?: number;
-        message?: string;
-        results?: { saved_name: string; renamed: boolean; item_count: number }[];
-      };
+      const data = await apiFetch(`/plu/import/${companyId}`, {
+        method: "POST", body: JSON.stringify(body),
+      }) as { success?: boolean; imported?: number; total?: number; message?: string };
 
       if (data.success) {
-        const renamed = (data.results ?? []).filter((r) => r.renamed);
-        setImportResult({
-          ok: true,
-          text: `${data.imported ?? 0} / ${data.total ?? 0} grup aktarıldı ✓`,
-          detail:
-            renamed.length > 0
-              ? `Yeniden adlandırılan: ${renamed.map((r) => r.saved_name).join(", ")}`
-              : undefined,
-        });
+        setImportResult({ ok: true, text: `${data.imported}/${data.total} grup aktarıldı ✓` });
         await reloadGroups();
       } else {
         setImportResult({ ok: false, text: data.message ?? "Aktarma başarısız." });
       }
     } catch (e) {
-      setImportResult({ ok: false, text: `Dosya okunamadı: ${String(e)}` });
+      setImportResult({ ok: false, text: `Hata: ${String(e)}` });
     } finally {
       setImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
-  // İşyeri işlemleri
+  // İşyeri ekle
   const addWorkplace = async () => {
     if (!wpName.trim()) return;
     setSavingWp(true);
     try {
-      await apiFetch("/workplaces", { method: "POST", body: JSON.stringify({
-        company_id: companyId, name: wpName.trim(), address: wpAddress, phone: wpPhone,
-      }) });
-      setWpName(""); setWpAddress(""); setWpPhone(""); setShowWpForm(false);
-      await loadWorkplaces();
+      await apiFetch("/workplaces", { method: "POST",
+        body: JSON.stringify({ company_id: companyId, name: wpName.trim() }) });
+      setWpName(""); setShowWpForm(false);
+      await loadAll();
     } finally { setSavingWp(false); }
-  };
-
-  // Grup işlemleri
-  const addGroup = async () => {
-    if (!newGroupName.trim()) return;
-    setAddingGroup(true);
-    try {
-      await apiFetch("/plu/groups", { method: "POST", body: JSON.stringify({
-        company_id:   scope === "company"   ? companyId    : null,
-        workplace_id: currentWorkplaceId,
-        name: newGroupName.trim(), color: newGroupColor,
-      }) });
-      setNewGroupName(""); setShowGroupForm(false);
-      await reloadGroups();
-    } finally { setAddingGroup(false); }
-  };
-
-  const deleteGroup = async (id: string) => {
-    if (!confirm("Bu grup ve içindeki tüm ürün kodları silinecek. Emin misiniz?")) return;
-    await apiFetch(`/plu/groups/${id}`, { method: "DELETE" });
-    if (activeGroup?.id === id) setActiveGroup(null);
-    await reloadGroups();
-  };
-
-  const updateGroupColor = async (groupId: string, color: string) => {
-    await apiFetch(`/plu/groups/${groupId}`, { method: "PATCH", body: JSON.stringify({ color }) });
-    await reloadGroups();
-  };
-
-  // Item işlemleri
-  const addItem = async () => {
-    if (!activeGroup || !newCode.trim()) return;
-    setAddingItem(true); setItemError("");
-    try {
-      const data = await apiFetch("/plu/items", { method: "POST", body: JSON.stringify({
-        group_id: activeGroup.id,
-        company_id:   scope === "company"   ? companyId    : null,
-        workplace_id: currentWorkplaceId,
-        product_code: newCode.trim(),
-      }) }) as { success?: boolean; message?: string };
-      if (data.success === false) { setItemError(data.message ?? "Hata."); return; }
-      setNewCode(""); await reloadGroups();
-    } finally { setAddingItem(false); }
-  };
-
-  const addProductToGroup = async (productCode: string) => {
-    if (!activeGroup) return;
-    setAddingItem(true); setItemError("");
-    try {
-      const data = await apiFetch("/plu/items", { method: "POST", body: JSON.stringify({
-        group_id: activeGroup.id,
-        company_id:   scope === "company"   ? companyId    : null,
-        workplace_id: currentWorkplaceId,
-        product_code: String(productCode).trim(),
-      }) }) as { success?: boolean; message?: string };
-      if (data.success === false) { setItemError(data.message ?? "Hata."); return; }
-      await reloadGroups();
-    } finally { setAddingItem(false); }
-  };
-
-  const deleteItem = async (itemId: string, code: string) => {
-    if (!confirm(`"${code}" kodlu ürün bu gruptan kaldırılsın mı?`)) return;
-    await apiFetch(`/plu/items/${itemId}`, { method: "DELETE" });
-    await reloadGroups();
-  };
-
-  // Sıra güncelleme — sürükle bırak sonrası
-  const handleReorder = async (newItems: PluItem[]) => {
-    // Lokal state'i güncelle
-    setGroups(prev => prev.map(g =>
-      g.id === activeGroup?.id ? { ...g, plu_items: newItems } : g
-    ));
-    setActiveGroup(prev => prev ? { ...prev, plu_items: newItems } : prev);
-
-    // API'ye gönder — her item'ın sort_order'ını güncelle
-    try {
-      await Promise.all(newItems.map(item =>
-        apiFetch(`/plu/items/${item.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ sort_order: item.sort_order }),
-        })
-      ));
-    } catch (e) {
-      console.error("Sıralama güncellenemedi:", e);
-    }
-  };
-
-  const closeAddItemModal = () => {
-    setAddItemModal(false); setProductSearch(""); setSearchResults([]);
-    setSearchTotal(0); setSearchPage(1);
   };
 
   const currentGroup = activeGroup
@@ -605,419 +614,484 @@ function PluPage() {
 
   const searchTotalPages = Math.max(1, Math.ceil(searchTotal / SEARCH_LIMIT));
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 4rem)", margin: "-32px", overflow: "hidden" }}>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".json,application/json"
-        style={{ display: "none" }}
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) void importPlu(file);
-        }}
-      />
+  // Ağaç düğüm render
+  function renderTree() {
+    return (
+      <div style={{ display:"flex", flexDirection:"column" }}>
 
-      {/* Ürün Ekleme Modalı */}
-      {addItemModal && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 9998, background: "rgba(0,0,0,0.45)",
-          display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ background: "white", borderRadius: 14, padding: 24, width: 520,
-            maxHeight: "80vh", display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 16, fontWeight: 600 }}>Ürün Ekle — {activeGroup?.name}</span>
-              <button type="button" onClick={closeAddItemModal}
-                style={{ background: "none", border: "none", cursor: "pointer", fontSize: 20, color: "#9E9E9E" }}>✕</button>
+        {/* İşyerleri + Kasaları */}
+        {workplaces.map(wp => {
+          const wpTerminals = terminals.filter(t => t.workplace_id === wp.id);
+          const isWpActive  = selectedNode?.id === wp.id;
+          return (
+            <div key={wp.id}>
+              {/* İşyeri satırı */}
+              <div
+                onClick={() => setSelectedNode({ type:"workplace", id:wp.id, label:wp.name })}
+                style={{
+                  display:"flex", alignItems:"center", gap:6,
+                  padding:"7px 12px", cursor:"pointer",
+                  background: isWpActive ? "#EFF6FF" : "white",
+                  borderBottom:"1px solid #F9FAFB",
+                }}
+              >
+                <span style={{ fontSize:12 }}>📍</span>
+                <span style={{ fontSize:12, fontWeight:600, color:"#374151", flex:1 }}>{wp.name}</span>
+                <span style={{ fontSize:10, color:"#9ca3af" }}>{wpTerminals.length} kasa</span>
+              </div>
+
+              {/* Kasalar */}
+              {wpTerminals.map(t => {
+                const isActive = selectedNode?.id === t.id && selectedNode.type === "terminal";
+                return (
+                  <div
+                    key={t.id}
+                    onClick={() => setSelectedNode({
+                      type:"terminal", id:t.id, label:t.terminal_name, workplaceId:wp.id
+                    })}
+                    style={{
+                      display:"flex", alignItems:"center", gap:6,
+                      padding:"6px 12px 6px 24px", cursor:"pointer",
+                      background: isActive ? "#F5F3FF" : "white",
+                      borderLeft: isActive ? "3px solid #8B5CF6" : "3px solid transparent",
+                      borderBottom:"1px solid #F9FAFB",
+                    }}
+                  >
+                    <span style={{ fontSize:11 }}>🖥</span>
+                    <span style={{ fontSize:12, color: isActive ? "#6D28D9" : "#374151",
+                      fontWeight: isActive ? 600 : 400, flex:1 }}>
+                      {t.terminal_name}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
-            <div style={{ position: "relative" }}>
+          );
+        })}
+
+        {/* İşyeri ekle butonu */}
+        <button
+          onClick={() => setShowWpForm(v => !v)}
+          style={{ padding:"7px 12px", background:"none", border:"none", cursor:"pointer",
+            fontSize:11, color:"#9ca3af", textAlign:"left", borderBottom:"1px solid #F9FAFB" }}>
+          + İşyeri Ekle
+        </button>
+
+        {/* Ayırıcı */}
+        <div style={{ height:1, background:"#E5E7EB", margin:"8px 0" }} />
+
+        {/* Kasiyerler */}
+        <div style={{ padding:"4px 12px 4px", fontSize:10, fontWeight:600,
+          color:"#9ca3af", textTransform:"uppercase", letterSpacing:"0.5px" }}>
+          Kasiyerler
+        </div>
+        {cashiers.map(c => {
+          const isActive = selectedNode?.id === c.id && selectedNode.type === "cashier";
+          return (
+            <div
+              key={c.id}
+              onClick={() => setSelectedNode({ type:"cashier", id:c.id, label:c.full_name })}
+              style={{
+                display:"flex", alignItems:"center", gap:6,
+                padding:"6px 12px", cursor:"pointer",
+                background: isActive ? "#ECFDF5" : "white",
+                borderLeft: isActive ? "3px solid #10B981" : "3px solid transparent",
+                borderBottom:"1px solid #F9FAFB",
+              }}
+            >
+              <span style={{ fontSize:11 }}>👤</span>
+              <span style={{ fontSize:12, color: isActive ? "#065F46" : "#374151",
+                fontWeight: isActive ? 600 : 400, flex:1 }}>
+                {c.full_name}
+              </span>
+              <span style={{ fontSize:9, color:"#9ca3af", fontFamily:"monospace" }}>
+                {c.cashier_code}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column",
+      height:"calc(100vh - 4rem)", margin:"-32px", overflow:"hidden" }}>
+
+      {/* Gizli file input */}
+      <input ref={fileInputRef} type="file" accept=".json" style={{ display:"none" }}
+        onChange={e => { const f = e.target.files?.[0]; if (f) void importPlu(f); }} />
+
+      {/* Çakışma uyarısı modalı */}
+      {showConflictWarning && (
+        <div style={{ position:"fixed", inset:0, zIndex:9999,
+          background:"rgba(0,0,0,0.4)", display:"flex",
+          alignItems:"center", justifyContent:"center" }}>
+          <div style={{ background:"white", borderRadius:12, padding:24, width:400 }}>
+            <div style={{ fontSize:15, fontWeight:600, color:"#111", marginBottom:8 }}>
+              ⚠️ Aynı İsimde Grup Var
+            </div>
+            <div style={{ fontSize:13, color:"#6B7280", marginBottom:20 }}>
+              <strong>"{newGroupName}"</strong> adında zaten bir grup mevcut.
+              Üstüne yazarsanız <strong>eski grup ve içindeki tüm ürün kodları silinecektir.</strong>
+            </div>
+            <div style={{ display:"flex", gap:8 }}>
+              <button
+                onClick={() => { setShowConflictWarning(false); }}
+                style={{ flex:1, padding:"10px", borderRadius:8, border:"1px solid #E0E0E0",
+                  background:"white", cursor:"pointer", fontSize:13, color:"#374151" }}>
+                İptal
+              </button>
+              <button
+                onClick={() => { void doAddGroup(false); }}
+                style={{ flex:1, padding:"10px", borderRadius:8, border:"1px solid #90CAF9",
+                  background:"#E3F2FD", cursor:"pointer", fontSize:13,
+                  fontWeight:500, color:"#1565C0" }}>
+                Yeni Grup Oluştur
+              </button>
+              <button
+                onClick={() => { void doAddGroup(true); }}
+                style={{ flex:1, padding:"10px", borderRadius:8, border:"none",
+                  background:"#DC2626", cursor:"pointer", fontSize:13,
+                  fontWeight:600, color:"white" }}>
+                Üstüne Yaz
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ürün ekleme modalı */}
+      {addItemModal && (
+        <div style={{ position:"fixed", inset:0, zIndex:9998,
+          background:"rgba(0,0,0,0.45)", display:"flex",
+          alignItems:"center", justifyContent:"center" }}>
+          <div style={{ background:"white", borderRadius:14, padding:24, width:520,
+            maxHeight:"80vh", display:"flex", flexDirection:"column", gap:12 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ fontSize:15, fontWeight:600 }}>
+                Ürün Ekle — {currentGroup?.name}
+              </span>
+              <button onClick={() => { setAddItemModal(false); setProductSearch(""); setSearchResults([]); }}
+                style={{ background:"none", border:"none", cursor:"pointer", fontSize:20, color:"#9E9E9E" }}>✕</button>
+            </div>
+            <div style={{ position:"relative" }}>
               <input autoFocus value={productSearch} onChange={e => setProductSearch(e.target.value)}
-                placeholder="Ürün adı veya kodu ile ara (min 2 karakter)..."
-                style={{ width: "100%", border: "1px solid #E0E0E0", borderRadius: 10,
-                  padding: "10px 40px 10px 14px", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                placeholder="Ürün adı veya kodu ile ara..."
+                style={{ width:"100%", border:"1px solid #E0E0E0", borderRadius:10,
+                  padding:"10px 40px 10px 14px", fontSize:13, outline:"none", boxSizing:"border-box" }} />
               {searchLoading && (
-                <div style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)",
-                  fontSize: 11, color: "#9E9E9E" }}>⟳ Aranıyor...</div>
+                <div style={{ position:"absolute", right:12, top:"50%",
+                  transform:"translateY(-50%)", fontSize:11, color:"#9E9E9E" }}>⟳</div>
               )}
             </div>
-            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4, minHeight: 200 }}>
+            <div style={{ flex:1, overflowY:"auto", display:"flex",
+              flexDirection:"column", gap:4, minHeight:200 }}>
               {productSearch.trim().length < 2 && (
-                <div style={{ textAlign: "center", color: "#BDBDBD", padding: "32px 0", fontSize: 13 }}>En az 2 karakter girin</div>
+                <div style={{ textAlign:"center", color:"#BDBDBD", padding:"32px 0", fontSize:13 }}>
+                  En az 2 karakter girin
+                </div>
               )}
               {productSearch.trim().length >= 2 && !searchLoading && searchResults.length === 0 && (
-                <div style={{ textAlign: "center", color: "#BDBDBD", padding: "32px 0", fontSize: 13 }}>Ürün bulunamadı</div>
+                <div style={{ textAlign:"center", color:"#BDBDBD", padding:"32px 0", fontSize:13 }}>
+                  Ürün bulunamadı
+                </div>
               )}
               {searchResults.map(p => (
-                <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
-                  padding: "10px 12px", borderRadius: 8, border: "1px solid #F0F0F0" }}
-                  onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = "#F8F9FF"; }}
-                  onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = "white"; }}>
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontSize: 13, fontWeight: 500, color: "#212121",
-                      whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
-                    <div style={{ fontSize: 11, color: "#9E9E9E", fontFamily: "monospace", marginTop: 2 }}>
+                <div key={p.id}
+                  style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                    padding:"10px 12px", borderRadius:8, border:"1px solid #F0F0F0" }}
+                  onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background="#F8F9FF"}
+                  onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background="white"}>
+                  <div style={{ minWidth:0, flex:1 }}>
+                    <div style={{ fontSize:13, fontWeight:500, color:"#212121",
+                      whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                      {p.name}
+                    </div>
+                    <div style={{ fontSize:11, color:"#9E9E9E", fontFamily:"monospace", marginTop:2 }}>
                       {p.code}{p.barcode ? ` · ${p.barcode}` : ""}
                     </div>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0, marginLeft: 12 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1565C0" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:10,
+                    flexShrink:0, marginLeft:12 }}>
+                    <span style={{ fontSize:13, fontWeight:700, color:"#1565C0" }}>
                       {p.salesPriceTaxIncluded != null
-                        ? `${p.salesPriceTaxIncluded.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} ₺` : "—"}
+                        ? `${p.salesPriceTaxIncluded.toLocaleString("tr-TR", { minimumFractionDigits:2 })} ₺`
+                        : "—"}
                     </span>
-                    <button type="button" onClick={() => void addProductToGroup(p.code)} disabled={addingItem}
-                      style={{ background: "#E3F2FD", border: "1px solid #90CAF9", borderRadius: 7,
-                        padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 600,
-                        color: "#1565C0", opacity: addingItem ? 0.6 : 1 }}>+ Ekle</button>
+                    <button onClick={() => void addItem(p.code)} disabled={addingItem}
+                      style={{ background:"#E3F2FD", border:"1px solid #90CAF9", borderRadius:7,
+                        padding:"6px 12px", cursor:"pointer", fontSize:12, fontWeight:600,
+                        color:"#1565C0", opacity:addingItem ? 0.6 : 1 }}>+ Ekle</button>
                   </div>
                 </div>
               ))}
             </div>
             {searchTotal > SEARCH_LIMIT && (
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
-                borderTop: "1px solid #F0F0F0", paddingTop: 12 }}>
-                <button type="button" onClick={() => void searchProducts(productSearch.trim(), searchPage - 1)}
+              <div style={{ display:"flex", justifyContent:"space-between",
+                alignItems:"center", borderTop:"1px solid #F0F0F0", paddingTop:12 }}>
+                <button onClick={() => void searchProducts(productSearch.trim(), searchPage - 1)}
                   disabled={searchPage <= 1}
-                  style={{ background: "#F3F4F6", border: "1px solid #E0E0E0", borderRadius: 6,
-                    padding: "6px 12px", cursor: "pointer", fontSize: 12, opacity: searchPage <= 1 ? 0.4 : 1 }}>← Önceki</button>
-                <span style={{ fontSize: 12, color: "#9E9E9E" }}>
-                  {searchPage} / {searchTotalPages} · {searchTotal} ürün
+                  style={{ background:"#F3F4F6", border:"1px solid #E0E0E0", borderRadius:6,
+                    padding:"6px 12px", cursor:"pointer", fontSize:12,
+                    opacity:searchPage <= 1 ? 0.4 : 1 }}>← Önceki</button>
+                <span style={{ fontSize:12, color:"#9E9E9E" }}>
+                  {searchPage}/{searchTotalPages} · {searchTotal} ürün
                 </span>
-                <button type="button" onClick={() => void searchProducts(productSearch.trim(), searchPage + 1)}
+                <button onClick={() => void searchProducts(productSearch.trim(), searchPage + 1)}
                   disabled={searchPage >= searchTotalPages}
-                  style={{ background: "#F3F4F6", border: "1px solid #E0E0E0", borderRadius: 6,
-                    padding: "6px 12px", cursor: "pointer", fontSize: 12,
-                    opacity: searchPage >= searchTotalPages ? 0.4 : 1 }}>Sonraki →</button>
+                  style={{ background:"#F3F4F6", border:"1px solid #E0E0E0", borderRadius:6,
+                    padding:"6px 12px", cursor:"pointer", fontSize:12,
+                    opacity:searchPage >= searchTotalPages ? 0.4 : 1 }}>Sonraki →</button>
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* ── Üst Bar: Kapsam + Seçim ── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 20px",
-        background: "white", borderBottom: "1px solid #E5E7EB", flexShrink: 0, flexWrap: "wrap" }}>
+      {/* Ana layout */}
+      <div style={{ display:"flex", flex:1, overflow:"hidden", minHeight:0 }}>
 
-        <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af",
-          textTransform: "uppercase", letterSpacing: "0.5px", marginRight: 4 }}>PLU Kapsamı</span>
+        {/* ── Sol: Ağaç ── */}
+        <aside style={{ width:220, flexShrink:0, display:"flex", flexDirection:"column",
+          borderRight:"1px solid #E5E7EB", background:"white", overflow:"hidden" }}>
 
-        {(["company", "workplace", "terminal"] as Scope[]).map(s => (
-          <button key={s} type="button" onClick={() => setScope(s)} style={{
-            padding: "5px 12px", borderRadius: 7, cursor: "pointer",
-            fontSize: 12, fontWeight: 500,
-            border: `1px solid ${scope === s ? "#3B82F6" : "#E5E7EB"}`,
-            background: scope === s ? "#EFF6FF" : "white",
-            color: scope === s ? "#1D4ED8" : "#6B7280",
-          }}>
-            {s === "company" ? "Şirket Geneli" : s === "workplace" ? "İşyeri Bazında" : "Kasa Bazında"}
-          </button>
-        ))}
+          <div style={{ padding:"10px 12px", borderBottom:"1px solid #F0F0F0",
+            fontSize:11, fontWeight:700, color:"#374151", textTransform:"uppercase",
+            letterSpacing:"0.5px" }}>
+            PLU Yönetimi
+          </div>
 
-        {/* İşyeri sekmeleri */}
-        {scope === "workplace" && (
-          <>
-            <div style={{ width: 1, height: 20, background: "#E5E7EB", margin: "0 4px" }} />
-            {workplaces.map(wp => (
-              <button key={wp.id} type="button" onClick={() => setActiveWp(wp)} style={{
-                padding: "5px 12px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 500,
-                border: `1px solid ${activeWp?.id === wp.id ? "#3B82F6" : "#E5E7EB"}`,
-                background: activeWp?.id === wp.id ? "#EFF6FF" : "white",
-                color: activeWp?.id === wp.id ? "#1D4ED8" : "#6B7280",
-              }}>{wp.name}</button>
-            ))}
-            <button type="button" onClick={() => setShowWpForm(v => !v)} style={{
-              padding: "5px 12px", borderRadius: 7, cursor: "pointer", fontSize: 12,
-              border: "1px dashed #D1D5DB", background: "white", color: "#9ca3af",
-            }}>+ İşyeri Ekle</button>
-          </>
-        )}
+          <div style={{ flex:1, overflowY:"auto" }}>
+            {renderTree()}
+          </div>
 
-        {/* Kasa sekmeleri */}
-        {scope === "terminal" && (
-          <>
-            <div style={{ width: 1, height: 20, background: "#E5E7EB", margin: "0 4px" }} />
-            {terminals.map(t => (
-              <button key={t.id} type="button"
-                onClick={() => { setActiveTerm(t); }}
-                style={{
-                  padding: "5px 12px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 500,
-                  border: `1px solid ${activeTerm?.id === t.id ? "#3B82F6" : "#E5E7EB"}`,
-                  background: activeTerm?.id === t.id ? "#EFF6FF" : "white",
-                  color: activeTerm?.id === t.id ? "#1D4ED8" : "#6B7280",
-                }}>{t.terminal_name}</button>
-            ))}
-          </>
-        )}
-
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          {importResult && (
-            <span
-              style={{
-                fontSize: 11,
-                fontWeight: 500,
-                padding: "4px 10px",
-                borderRadius: 6,
-                background: importResult.ok ? "#F0FDF4" : "#FEF2F2",
-                color: importResult.ok ? "#166534" : "#991B1B",
-                border: `1px solid ${importResult.ok ? "#BBF7D0" : "#FECACA"}`,
-                maxWidth: 240,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-              title={importResult.detail}
-            >
-              {importResult.text}
-            </span>
+          {/* İşyeri ekleme formu */}
+          {showWpForm && (
+            <div style={{ padding:"10px 12px", borderTop:"1px solid #F0F0F0",
+              background:"#F9FAFB", display:"flex", flexDirection:"column", gap:6 }}>
+              <input value={wpName} onChange={e => setWpName(e.target.value)}
+                placeholder="İşyeri adı" autoFocus
+                style={{ border:"1px solid #E0E0E0", borderRadius:6,
+                  padding:"6px 10px", fontSize:12, outline:"none" }} />
+              <div style={{ display:"flex", gap:6 }}>
+                <button onClick={() => setShowWpForm(false)}
+                  style={{ flex:1, padding:"6px", borderRadius:6, border:"1px solid #E0E0E0",
+                    background:"white", cursor:"pointer", fontSize:11, color:"#6B7280" }}>İptal</button>
+                <button onClick={addWorkplace} disabled={savingWp || !wpName.trim()}
+                  style={{ flex:1, padding:"6px", borderRadius:6, border:"none",
+                    background:"#1D4ED8", color:"white", cursor:"pointer", fontSize:11,
+                    fontWeight:600, opacity:savingWp || !wpName.trim() ? 0.5 : 1 }}>
+                  {savingWp ? "..." : "Kaydet"}</button>
+              </div>
+            </div>
           )}
+        </aside>
 
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={importing}
-            style={{
-              padding: "5px 12px",
-              borderRadius: 7,
-              cursor: "pointer",
-              fontSize: 12,
-              fontWeight: 500,
-              border: "1px solid #E5E7EB",
-              background: "white",
-              color: "#374151",
-              opacity: importing ? 0.6 : 1,
-            }}
-          >
-            {importing ? "Aktarılıyor..." : "⬆ İçeri Aktar"}
-          </button>
+        {/* ── Orta: Grup Listesi ── */}
+        <div style={{ width:240, flexShrink:0, display:"flex", flexDirection:"column",
+          borderRight:"1px solid #E5E7EB", background:"#FAFAFA", overflow:"hidden" }}>
 
-          <button
-            type="button"
-            onClick={() => void exportPlu()}
-            style={{
-              padding: "5px 12px",
-              borderRadius: 7,
-              cursor: "pointer",
-              fontSize: 12,
-              fontWeight: 500,
-              border: "1px solid #E5E7EB",
-              background: "white",
-              color: "#374151",
-            }}
-          >
-            ⬇ Dışarı Aktar
-          </button>
+          {!selectedNode || selectedNode.type === "workplace" ? (
+            <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
+              fontSize:12, color:"#9ca3af", padding:16, textAlign:"center" }}>
+              Sol taraftan bir kasa veya kasiyer seçin
+            </div>
+          ) : (
+            <>
+              {/* Grup başlık */}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+                padding:"10px 12px", borderBottom:"1px solid #F0F0F0", background:"white" }}>
+                <div>
+                  <div style={{ fontSize:12, fontWeight:600, color:"#374151" }}>
+                    {selectedNode.label}
+                  </div>
+                  <div style={{ fontSize:10, color:"#9ca3af", marginTop:1 }}>
+                    {selectedNode.type === "terminal" ? "🖥 Kasa PLU" : "👤 Kasiyer PLU"}
+                  </div>
+                </div>
+                <button onClick={() => setShowGroupForm(v => !v)}
+                  style={{ fontSize:11, fontWeight:600, padding:"4px 10px",
+                    background:"#1D4ED8", color:"white", border:"none",
+                    borderRadius:6, cursor:"pointer" }}>+ Grup</button>
+              </div>
 
-          {scope === "terminal" && activeTerm && (
-            <button
-              type="button"
-              onClick={() => setShowPreview((v) => !v)}
-              style={{
-                padding: "5px 12px",
-                borderRadius: 7,
-                cursor: "pointer",
-                fontSize: 12,
-                fontWeight: 500,
-                border: `1px solid ${showPreview ? "#3B82F6" : "#E5E7EB"}`,
-                background: showPreview ? "#EFF6FF" : "white",
-                color: showPreview ? "#1D4ED8" : "#6B7280",
-              }}
-            >
-              {showPreview ? "Listeye Dön" : "▦ Kasa Önizleme"}
-            </button>
+              {!loading && groups.length > 0 && (
+                <div style={{ display:"flex", flexWrap:"wrap", alignItems:"center", gap:6,
+                  padding:"6px 12px", borderBottom:"1px solid #F0F0F0", background:"#FAFAFA" }}>
+                  <button type="button"
+                    disabled={selectedGroupIds.length === 0 || deletingBulk}
+                    onClick={() => void deleteSelectedGroups()}
+                    style={{
+                      fontSize:10, fontWeight:600, padding:"4px 8px",
+                      background: selectedGroupIds.length === 0 ? "#E5E7EB" : "#DC2626",
+                      color: selectedGroupIds.length === 0 ? "#9CA3AF" : "white",
+                      border:"none", borderRadius:5,
+                      cursor: selectedGroupIds.length === 0 || deletingBulk ? "default" : "pointer",
+                    }}>
+                    {deletingBulk ? "…" : `Seçilenleri sil (${selectedGroupIds.length})`}
+                  </button>
+                  <button type="button"
+                    onClick={() => setSelectedGroupIds(groups.map(g => g.id))}
+                    style={{ fontSize:10, padding:"4px 8px", border:"1px solid #E0E0E0",
+                      background:"white", borderRadius:5, cursor:"pointer", color:"#374151" }}>
+                    Tümünü seç
+                  </button>
+                  <button type="button"
+                    disabled={selectedGroupIds.length === 0}
+                    onClick={() => setSelectedGroupIds([])}
+                    style={{
+                      fontSize:10, padding:"4px 8px", border:"1px solid #E0E0E0",
+                      background:"white", borderRadius:5,
+                      cursor: selectedGroupIds.length === 0 ? "default" : "pointer",
+                      color:"#6B7280", opacity: selectedGroupIds.length === 0 ? 0.5 : 1,
+                    }}>
+                    Seçimi temizle
+                  </button>
+                </div>
+              )}
+
+              {/* Grup ekleme formu */}
+              {showGroupForm && (
+                <div style={{ padding:"10px 12px", borderBottom:"1px solid #F0F0F0",
+                  background:"white", display:"flex", flexDirection:"column", gap:8 }}>
+                  <input value={newGroupName} onChange={e => setNewGroupName(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && void checkConflictAndAdd()}
+                    placeholder="Grup adı" autoFocus
+                    style={{ border:"1px solid #E0E0E0", borderRadius:6,
+                      padding:"6px 10px", fontSize:12, outline:"none" }} />
+                  <ColorPicker selected={newGroupColor} onSelect={setNewGroupColor} />
+                  <div style={{ display:"flex", gap:6 }}>
+                    <button onClick={() => setShowGroupForm(false)}
+                      style={{ flex:1, padding:"5px", borderRadius:5, border:"1px solid #E0E0E0",
+                        background:"white", cursor:"pointer", fontSize:11, color:"#6B7280" }}>İptal</button>
+                    <button onClick={() => void checkConflictAndAdd()}
+                      disabled={addingGroup || !newGroupName.trim()}
+                      style={{ flex:1, padding:"5px", borderRadius:5, border:"none",
+                        background:"#1D4ED8", color:"white", cursor:"pointer", fontSize:11,
+                        fontWeight:600, opacity:addingGroup || !newGroupName.trim() ? 0.5 : 1 }}>
+                      {addingGroup ? "..." : "Kaydet"}</button>
+                  </div>
+                </div>
+              )}
+
+              {/* Grup listesi — sürükle bırak */}
+              <div style={{ flex:1, overflowY:"auto", padding:"8px" }}>
+                {loading ? (
+                  [1,2,3].map(i => (
+                    <div key={i} style={{ height:36, background:"#F0F0F0", borderRadius:6,
+                      marginBottom:4, opacity:0.6 }} />
+                  ))
+                ) : (
+                  <DraggableGroupList
+                    groups={groups}
+                    activeId={currentGroup?.id ?? null}
+                    selectedIds={selectedGroupIds}
+                    onSelect={setActiveGroup}
+                    onToggleSelect={toggleGroupSelection}
+                    onDelete={deleteGroup}
+                    onReorder={handleGroupReorder}
+                  />
+                )}
+              </div>
+
+              {/* Export/Import */}
+              <div style={{ padding:"8px 10px", borderTop:"1px solid #F0F0F0",
+                display:"flex", gap:6, background:"white" }}>
+                {importResult && (
+                  <div style={{ fontSize:10, color: importResult.ok ? "#166534" : "#991B1B",
+                    padding:"3px 6px", borderRadius:4, flex:1,
+                    background: importResult.ok ? "#F0FDF4" : "#FEF2F2" }}>
+                    {importResult.text}
+                  </div>
+                )}
+                <button onClick={() => void exportPlu()}
+                  style={{ flex:1, padding:"5px", borderRadius:5, border:"1px solid #E0E0E0",
+                    background:"white", cursor:"pointer", fontSize:10, color:"#6B7280" }}>
+                  ⬇ Dışa</button>
+                <button onClick={() => fileInputRef.current?.click()} disabled={importing}
+                  style={{ flex:1, padding:"5px", borderRadius:5, border:"1px solid #E0E0E0",
+                    background:"white", cursor:"pointer", fontSize:10, color:"#6B7280",
+                    opacity:importing ? 0.6 : 1 }}>
+                  {importing ? "..." : "⬆ İçe"}</button>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* ── Sağ: Grup Detayı ── */}
+        <div style={{ flex:1, display:"flex", flexDirection:"column",
+          overflow:"hidden", minWidth:0, background:"white" }}>
+
+          {!currentGroup ? (
+            <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
+              fontSize:12, color:"#9ca3af" }}>
+              Ortadan bir grup seçin
+            </div>
+          ) : (
+            <>
+              {/* Grup başlık */}
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+                padding:"10px 16px", borderBottom:"1px solid #F0F0F0", flexShrink:0, flexWrap:"wrap", gap:8 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <span style={{ width:12, height:12, borderRadius:3, background:currentGroup.color }} />
+                  <span style={{ fontSize:14, fontWeight:600, color:"#111" }}>{currentGroup.name}</span>
+                  <span style={{ fontSize:11, color:"#9ca3af" }}>
+                    {currentGroup.plu_items?.length ?? 0} ürün
+                  </span>
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+                  <ColorPicker selected={currentGroup.color}
+                    onSelect={c => updateGroupColor(currentGroup.id, c)} />
+                  <button onClick={() => setAddItemModal(true)}
+                    style={{ background:"#1D4ED8", color:"white", border:"none",
+                      borderRadius:7, padding:"6px 12px", cursor:"pointer",
+                      fontSize:12, fontWeight:600 }}>+ ERP&apos;den Ekle</button>
+                </div>
+              </div>
+
+              {/* Manuel kod ekleme */}
+              <div style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 16px",
+                background:"#F9FAFB", borderBottom:"1px solid #F0F0F0", flexShrink:0 }}>
+                <input value={newCode}
+                  onChange={e => { setNewCode(e.target.value); setItemError(""); }}
+                  onKeyDown={e => e.key === "Enter" && void addItem(newCode)}
+                  placeholder="Ürün kodu ile ekle..."
+                  style={{ flex:1, border:"1px solid #E0E0E0", borderRadius:7,
+                    padding:"6px 10px", fontSize:12, outline:"none", fontFamily:"monospace" }} />
+                <button onClick={() => void addItem(newCode)}
+                  disabled={addingItem || !newCode.trim()}
+                  style={{ padding:"6px 14px", borderRadius:7, border:"none",
+                    background:currentGroup.color, color:"white", cursor:"pointer",
+                    fontSize:12, fontWeight:600,
+                    opacity:addingItem || !newCode.trim() ? 0.5 : 1 }}>
+                  {addingItem ? "..." : "+ Ekle"}</button>
+              </div>
+
+              {itemError && (
+                <div style={{ padding:"5px 16px", background:"#FEF2F2",
+                  borderBottom:"1px solid #FECACA", fontSize:11, color:"#EF4444" }}>
+                  {itemError}
+                </div>
+              )}
+
+              {/* Item listesi — sürükle bırak */}
+              <div style={{ flex:1, overflowY:"auto", padding:"12px 16px" }}>
+                <div style={{ fontSize:10, fontWeight:600, color:"#9ca3af",
+                  textTransform:"uppercase", letterSpacing:"0.5px", marginBottom:8 }}>
+                  Ürün Kodları · Sıralamak için sürükleyin
+                </div>
+                <DraggableItemList
+                  items={[...(currentGroup.plu_items ?? [])].sort((a,b) => a.sort_order - b.sort_order)}
+                  groupColor={currentGroup.color}
+                  onDelete={deleteItem}
+                  onReorder={handleItemReorder}
+                />
+              </div>
+            </>
           )}
         </div>
       </div>
-
-      {/* İşyeri form */}
-      {showWpForm && (
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 10, padding: "10px 20px",
-          background: "#F9FAFB", borderBottom: "1px solid #E5E7EB", flexShrink: 0, flexWrap: "wrap" }}>
-          <div style={{ flex: 1, minWidth: 160 }}>
-            <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 4 }}>İşyeri Adı *</div>
-            <input value={wpName} onChange={e => setWpName(e.target.value)} placeholder="Merkez Mağaza" autoFocus
-              style={{ width: "100%", border: "1px solid #E0E0E0", borderRadius: 7, padding: "7px 10px", fontSize: 13, outline: "none" }} />
-          </div>
-          <div style={{ flex: 2, minWidth: 180 }}>
-            <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 4 }}>Adres</div>
-            <input value={wpAddress} onChange={e => setWpAddress(e.target.value)} placeholder="Opsiyonel"
-              style={{ width: "100%", border: "1px solid #E0E0E0", borderRadius: 7, padding: "7px 10px", fontSize: 13, outline: "none" }} />
-          </div>
-          <button type="button" onClick={() => setShowWpForm(false)}
-            style={{ padding: "8px 14px", borderRadius: 7, border: "1px solid #E0E0E0",
-              background: "white", cursor: "pointer", fontSize: 12, color: "#6B7280" }}>İptal</button>
-          <button type="button" onClick={() => void addWorkplace()} disabled={savingWp || !wpName.trim()}
-            style={{ padding: "8px 14px", borderRadius: 7, border: "none",
-              background: "#1D4ED8", color: "white", cursor: "pointer", fontSize: 12, fontWeight: 600,
-              opacity: savingWp || !wpName.trim() ? 0.5 : 1 }}>
-            {savingWp ? "..." : "Kaydet"}
-          </button>
-        </div>
-      )}
-
-      {/* Ana içerik */}
-      {(scope === "workplace" && !activeWp) || (scope === "terminal" && !activeTerm) ? (
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 13, color: "#9ca3af" }}>
-          Üstten bir {scope === "workplace" ? "işyeri" : "kasa"} seçin.
-        </div>
-      ) : (
-        <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0 }}>
-
-          {/* ── Sol: Grup Listesi ── */}
-          <aside style={{ width: 256, flexShrink: 0, display: "flex", flexDirection: "column",
-            borderRight: "1px solid #E5E7EB", background: "white", overflow: "hidden" }}>
-
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "10px 14px", borderBottom: "1px solid #F0F0F0" }}>
-              <span style={{ fontSize: 11, fontWeight: 600, color: "#6B7280", overflow: "hidden",
-                textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {scope === "terminal" ? activeTerm?.terminal_name
-                  : scope === "workplace" ? activeWp?.name : "Şirket PLU Grupları"}
-              </span>
-              <button type="button" onClick={() => setShowGroupForm(v => !v)}
-                style={{ fontSize: 11, fontWeight: 600, padding: "4px 10px",
-                  background: "#1D4ED8", color: "white", border: "none",
-                  borderRadius: 6, cursor: "pointer", flexShrink: 0 }}>+ Grup</button>
-            </div>
-
-            {showGroupForm && (
-              <div style={{ padding: "10px 12px", borderBottom: "1px solid #F0F0F0",
-                background: "#F9FAFB", display: "flex", flexDirection: "column", gap: 8 }}>
-                <input value={newGroupName} onChange={e => setNewGroupName(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && void addGroup()}
-                  placeholder="Grup adı" autoFocus
-                  style={{ border: "1px solid #E0E0E0", borderRadius: 7, padding: "7px 10px",
-                    fontSize: 13, outline: "none" }} />
-                <ColorPicker selected={newGroupColor} onSelect={setNewGroupColor} size={18} />
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button type="button" onClick={() => setShowGroupForm(false)}
-                    style={{ flex: 1, padding: "6px", borderRadius: 6, border: "1px solid #E0E0E0",
-                      background: "white", cursor: "pointer", fontSize: 12, color: "#6B7280" }}>İptal</button>
-                  <button type="button" onClick={() => void addGroup()} disabled={addingGroup || !newGroupName.trim()}
-                    style={{ flex: 1, padding: "6px", borderRadius: 6, border: "none",
-                      background: "#1D4ED8", color: "white", cursor: "pointer", fontSize: 12,
-                      fontWeight: 600, opacity: addingGroup || !newGroupName.trim() ? 0.5 : 1 }}>
-                    {addingGroup ? "..." : "Kaydet"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div style={{ flex: 1, overflowY: "auto" }}>
-              {loading ? (
-                [1,2,3,4].map(i => (
-                  <div key={i} style={{ height: 40, background: "#F3F4F6", borderRadius: 8,
-                    margin: "6px 10px", animation: "pulse 1.5s infinite" }} />
-                ))
-              ) : groups.length === 0 ? (
-                <div style={{ textAlign: "center", color: "#9ca3af", padding: "40px 16px", fontSize: 13 }}>
-                  Henüz grup yok.<br/><span style={{ fontSize: 11 }}>+ Grup ile ekleyin.</span>
-                </div>
-              ) : groups.map(g => {
-                const isActive = currentGroup?.id === g.id;
-                return (
-                  <button key={g.id} type="button" onClick={() => setActiveGroup(g)}
-                    style={{
-                      width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
-                      padding: "9px 14px", textAlign: "left", border: "none", cursor: "pointer",
-                      borderBottom: "1px solid #F9FAFB",
-                      background: isActive ? g.color + GROUP_ROW_TINT : "white",
-                      borderLeft: `3px solid ${isActive ? g.color : "transparent"}`,
-                    }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                      <span style={{ width: 10, height: 10, borderRadius: 2, background: g.color, flexShrink: 0 }} />
-                      <span style={{ fontSize: 13, fontWeight: isActive ? 600 : 400,
-                        color: "#374151", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {g.name}
-                      </span>
-                      <span style={{ fontSize: 10, color: "#9ca3af", flexShrink: 0 }}>
-                        ({g.plu_items?.length ?? 0})
-                      </span>
-                    </div>
-                    <span onClick={e => { e.stopPropagation(); void deleteGroup(g.id); }}
-                      style={{ color: "#D1D5DB", fontSize: 11, cursor: "pointer", flexShrink: 0 }}>✕</span>
-                  </button>
-                );
-              })}
-            </div>
-          </aside>
-
-          {/* ── Sağ: Detay veya Önizleme ── */}
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-            {!currentGroup ? (
-              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 13, color: "#9ca3af" }}>Sol taraftan bir grup seçin.</div>
-            ) : showPreview && scope === "terminal" ? (
-              /* ── Kasa Önizleme Modu ── */
-              <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-                <PluGridPreview
-                  groups={groups}
-                  activeGroupId={currentGroup.id}
-                  settings={posSettings}
-                  allProducts={allProducts}
-                />
-              </div>
-            ) : (
-              /* ── Liste / Düzenleme Modu ── */
-              <>
-                {/* Başlık */}
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
-                  padding: "10px 20px", background: "white", borderBottom: "1px solid #E5E7EB",
-                  flexShrink: 0, gap: 12, flexWrap: "wrap" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ width: 12, height: 12, borderRadius: 3, background: currentGroup.color }} />
-                    <span style={{ fontSize: 15, fontWeight: 600, color: "#111" }}>{currentGroup.name}</span>
-                    <span style={{ fontSize: 11, color: "#9ca3af" }}>{currentGroup.plu_items?.length ?? 0} ürün</span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <button type="button" onClick={() => setAddItemModal(true)}
-                      style={{ background: "#1D4ED8", color: "white", border: "none",
-                        borderRadius: 8, padding: "7px 14px", cursor: "pointer",
-                        fontSize: 12, fontWeight: 600 }}>+ ERP&apos;den Ürün Ekle</button>
-                    <ColorPicker selected={currentGroup.color}
-                      onSelect={c => void updateGroupColor(currentGroup.id, c)} size={16} />
-                  </div>
-                </div>
-
-                {/* Manuel kod ekleme */}
-                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 20px",
-                  background: "#F9FAFB", borderBottom: "1px solid #E5E7EB", flexShrink: 0 }}>
-                  <input value={newCode} onChange={e => { setNewCode(e.target.value); setItemError(""); }}
-                    onKeyDown={e => e.key === "Enter" && void addItem()}
-                    placeholder="Ürün kodu girin (örn: SEHRIN_BILET_506097)"
-                    style={{ flex: 1, border: "1px solid #E0E0E0", borderRadius: 7, padding: "7px 10px",
-                      fontSize: 12, outline: "none", fontFamily: "monospace" }} />
-                  <button type="button" onClick={() => void addItem()} disabled={addingItem || !newCode.trim()}
-                    style={{ padding: "7px 14px", borderRadius: 7, border: "none",
-                      background: currentGroup.color, color: "white", cursor: "pointer",
-                      fontSize: 12, fontWeight: 600, opacity: addingItem || !newCode.trim() ? 0.5 : 1 }}>
-                    {addingItem ? "..." : "+ Ekle"}
-                  </button>
-                </div>
-
-                {itemError && (
-                  <div style={{ padding: "6px 20px", background: "#FEF2F2",
-                    borderBottom: "1px solid #FECACA", fontSize: 11, color: "#EF4444" }}>
-                    {itemError}
-                  </div>
-                )}
-
-                {/* Sürükle bırak ürün listesi */}
-                <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-                  <div style={{ fontSize: 10, fontWeight: 600, color: "#9ca3af",
-                    textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 10 }}>
-                    Ürün Kodları ({currentGroup.plu_items?.length ?? 0}) · Sıralamak için sürükleyin
-                  </div>
-                  <DraggableItemList
-                    items={[...(currentGroup.plu_items ?? [])].sort((a, b) => a.sort_order - b.sort_order)}
-                    groupColor={currentGroup.color}
-                    onDelete={deleteItem}
-                    onReorder={handleReorder}
-                  />
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
