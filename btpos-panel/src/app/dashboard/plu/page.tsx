@@ -12,14 +12,28 @@ const PRESET_COLORS = [
   "#43A047","#7CB342","#C0CA33","#F9A825",
   "#FB8C00","#F4511E","#6D4C41","#546E7A",
 ];
-const SEARCH_LIMIT = 20;
+const SEARCH_LIMIT = 50;
 
 interface Workplace { id: string; name: string }
 interface Terminal  { id: string; terminal_name: string; workplace_id?: string; is_installed: boolean }
 interface Cashier   { id: string; full_name: string; cashier_code: string }
-interface PluItem   { id: string; product_code: string; sort_order: number }
+interface PluItem {
+  id: string;
+  product_code: string;
+  sort_order: number;
+  product_name?: string;
+  product_barcode?: string;
+}
 interface PluGroup  { id: string; name: string; color: string; sort_order: number; is_active: boolean; plu_items: PluItem[] }
-interface ErpProduct { id: string; name: string; code: string; barcode?: string; salesPriceTaxIncluded?: number }
+interface ErpProduct {
+  id: string;
+  name: string;
+  code: string;
+  barcode?: string;
+  salesPriceTaxIncluded?: number;
+  mainUnitName?: string;
+  vatRate?: number;
+}
 interface ImportExportItem { product_code: string; sort_order: number }
 interface ImportExportGroup {
   name: string;
@@ -57,6 +71,66 @@ async function apiFetch(endpoint: string, options: RequestInit = {}) {
     headers: { ...authHeaders(), ...(options.headers as Record<string, string>) },
   });
   return res.json();
+}
+
+function strTrimmed(v: unknown): string | undefined {
+  if (typeof v === "string" && v.trim()) return v.trim();
+  return undefined;
+}
+
+/** GET /plu/groups ve POST yanıtları snake_case, camelCase veya nested product olabilir */
+function normalizePluItemFromApi(raw: unknown, idx: number): PluItem {
+  const r = raw as Record<string, unknown>;
+  const id = String(r.id ?? "");
+  const product_code = String(r.product_code ?? r.productCode ?? r.code ?? "");
+  const sort_order =
+    typeof r.sort_order === "number" ? r.sort_order : Number(r.sort_order ?? idx);
+  const nested =
+    r.product && typeof r.product === "object"
+      ? (r.product as Record<string, unknown>)
+      : null;
+
+  const product_name =
+    strTrimmed(r.product_name) ??
+    strTrimmed(r.productName) ??
+    strTrimmed(r.name) ??
+    (nested
+      ? strTrimmed(nested.name) ??
+        strTrimmed(nested.product_name) ??
+        strTrimmed(nested.productName)
+      : undefined);
+
+  const product_barcode =
+    strTrimmed(r.product_barcode) ??
+    strTrimmed(r.productBarcode) ??
+    strTrimmed(r.barcode) ??
+    (nested
+      ? strTrimmed(nested.barcode) ??
+        strTrimmed(nested.product_barcode) ??
+        strTrimmed(nested.productBarcode)
+      : undefined);
+
+  return {
+    id,
+    product_code,
+    sort_order,
+    ...(product_name ? { product_name } : {}),
+    ...(product_barcode ? { product_barcode } : {}),
+  };
+}
+
+function normalizePluGroupFromApi(raw: unknown, groupIdx: number): PluGroup {
+  const g = raw as Record<string, unknown>;
+  const plu_raw = Array.isArray(g.plu_items) ? g.plu_items : [];
+  return {
+    id: String(g.id ?? ""),
+    name: String(g.name ?? `Grup ${groupIdx + 1}`),
+    color: String(g.color ?? "#1E88E5"),
+    sort_order:
+      typeof g.sort_order === "number" ? g.sort_order : Number(g.sort_order ?? groupIdx),
+    is_active: Boolean(g.is_active ?? true),
+    plu_items: plu_raw.map((it, i) => normalizePluItemFromApi(it, i)),
+  };
 }
 
 function toImportExportGroups(raw: unknown): ImportExportGroup[] {
@@ -252,12 +326,34 @@ function DraggableItemList({
             cursor:"grab", userSelect:"none",
           }}
         >
-          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <span style={{ color:"#D1D5DB", fontSize:13 }}>⠿</span>
-            <span style={{ fontSize:10, color:"#D1D5DB", width:18, textAlign:"right" }}>{idx+1}</span>
-            <span style={{ fontSize:12, fontFamily:"monospace", fontWeight:500, color:"#374151" }}>
-              {item.product_code}
-            </span>
+          <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:0, flex:1 }}>
+            <span style={{ color:"#D1D5DB", fontSize:13, flexShrink:0 }}>⠿</span>
+            <span style={{ fontSize:10, color:"#D1D5DB", width:18, textAlign:"right", flexShrink:0 }}>{idx+1}</span>
+            <div style={{ display:"flex", flexDirection:"column", gap:2, minWidth:0, flex:1 }}>
+              {item.product_name && (
+                <span style={{ fontSize:12, fontWeight:600, color:"#111827" }}>
+                  {item.product_name}
+                </span>
+              )}
+              <div style={{ display:"flex", gap:4, flexWrap:"wrap", alignItems:"center" }}>
+                <span style={{
+                  fontSize:10, fontFamily:"monospace", fontWeight:700,
+                  background:"#F3F4F6", color:"#374151",
+                  padding:"2px 6px", borderRadius:3,
+                }}>
+                  {item.product_code}
+                </span>
+                {item.product_barcode && (
+                  <span style={{
+                    fontSize:10, fontFamily:"monospace",
+                    background:"#EFF6FF", color:"#1D4ED8",
+                    padding:"2px 6px", borderRadius:3,
+                  }}>
+                    {item.product_barcode}
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
           <button onClick={() => onDelete(item.id, item.product_code)}
             style={{ fontSize:11, color:"#EF4444", background:"#FEF2F2",
@@ -308,6 +404,7 @@ function PluPage() {
 
   // Ürün arama
   const [productSearch, setProductSearch] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<ErpProduct[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchPage,    setSearchPage]    = useState(1);
@@ -337,19 +434,30 @@ function PluPage() {
   useEffect(() => { void loadAll(); }, [loadAll]);
 
   // PLU gruplarını yükle
-  const loadGroups = useCallback(async (node: TreeNode) => {
+  const loadGroups = useCallback(async (node: TreeNode, keepActiveId?: string) => {
     setLoading(true);
-    setActiveGroup(null);
+    if (!keepActiveId) setActiveGroup(null);
     try {
       const params = new URLSearchParams();
       if (node.type === "terminal") params.append("terminal_id", node.id);
       else if (node.type === "cashier") params.append("cashier_id", node.id);
 
       const data = await apiFetch(`/plu/groups/${companyId}?${params.toString()}`);
-      const list: PluGroup[] = Array.isArray(data) ? data : [];
+      const rawList = Array.isArray(data)
+        ? data
+        : data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).data)
+          ? ((data as Record<string, unknown>).data as unknown[])
+          : [];
+      const list: PluGroup[] = rawList.map((g, i) => normalizePluGroupFromApi(g, i));
       setGroups(list);
       setSelectedGroupIds([]);
-      if (list.length > 0) setActiveGroup(list[0]);
+
+      if (keepActiveId) {
+        const found = list.find(g => g.id === keepActiveId);
+        setActiveGroup(found ?? (list.length > 0 ? list[0] : null));
+      } else {
+        setActiveGroup(list.length > 0 ? list[0] : null);
+      }
     } finally { setLoading(false); }
   }, [companyId]);
 
@@ -361,8 +469,10 @@ function PluPage() {
     }
   }, [selectedNode, loadGroups]);
 
-  const reloadGroups = useCallback(() => {
-    if (selectedNode && selectedNode.type !== "workplace") void loadGroups(selectedNode);
+  const reloadGroups = useCallback((keepActiveId?: string) => {
+    if (selectedNode && selectedNode.type !== "workplace") {
+      void loadGroups(selectedNode, keepActiveId);
+    }
   }, [selectedNode, loadGroups]);
 
   // Çakışma kontrolü — grup eklemeden önce mevcut grupları sil mi?
@@ -408,16 +518,17 @@ function PluPage() {
 
       await apiFetch("/plu/groups", { method: "POST", body: JSON.stringify(body) });
       setNewGroupName(""); setShowGroupForm(false); setShowConflictWarning(false);
-      await reloadGroups();
+      await reloadGroups(activeGroup?.id);
     } finally { setAddingGroup(false); }
   }
 
   const deleteGroup = async (id: string) => {
     if (!confirm("Bu grup ve içindeki tüm ürün kodları silinecek. Emin misiniz?")) return;
+    const keepId = activeGroup?.id === id ? undefined : activeGroup?.id;
     await apiFetch(`/plu/groups/${id}`, { method: "DELETE" });
     if (activeGroup?.id === id) setActiveGroup(null);
     setSelectedGroupIds(prev => prev.filter(x => x !== id));
-    await reloadGroups();
+    await reloadGroups(keepId);
   };
 
   useEffect(() => {
@@ -433,6 +544,8 @@ function PluPage() {
   const deleteSelectedGroups = async () => {
     if (selectedGroupIds.length === 0) return;
     if (!confirm(`Seçilen ${selectedGroupIds.length} grup ve içindeki tüm ürün kodları silinecek. Emin misiniz?`)) return;
+    const keepId =
+      activeGroup && selectedGroupIds.includes(activeGroup.id) ? undefined : activeGroup?.id;
     setDeletingBulk(true);
     try {
       for (const id of selectedGroupIds) {
@@ -440,7 +553,7 @@ function PluPage() {
       }
       if (activeGroup && selectedGroupIds.includes(activeGroup.id)) setActiveGroup(null);
       setSelectedGroupIds([]);
-      await reloadGroups();
+      await reloadGroups(keepId);
     } finally {
       setDeletingBulk(false);
     }
@@ -448,7 +561,7 @@ function PluPage() {
 
   const updateGroupColor = async (groupId: string, color: string) => {
     await apiFetch(`/plu/groups/${groupId}`, { method: "PATCH", body: JSON.stringify({ color }) });
-    await reloadGroups();
+    await reloadGroups(activeGroup?.id);
   };
 
   // Grup sıralama
@@ -464,16 +577,27 @@ function PluPage() {
     } catch (e) { console.error("Grup sıralama hatası:", e); }
   };
 
-  // Item işlemleri
-  const addItem = async (productCode: string) => {
-    if (!activeGroup || !productCode.trim()) return;
+  // Item işlemleri — string: sadece kod; ErpProduct: kod + product_name / product_barcode body'de
+  const addItem = async (input: string | ErpProduct) => {
+    const productCode =
+      typeof input === "string" ? input.trim() : String(input.code ?? "").trim();
+    if (!activeGroup || !productCode) return;
     setAddingItem(true); setItemError("");
     try {
       const body: Record<string, unknown> = {
         group_id:     activeGroup.id,
         company_id:   companyId,
-        product_code: productCode.trim(),
+        product_code: productCode,
       };
+      if (typeof input !== "string") {
+        const r = input as ErpProduct & Record<string, unknown>;
+        const name = String(input.name ?? r.product_name ?? "").trim();
+        const barcode = String(
+          input.barcode ?? r.barcode ?? r.product_barcode ?? ""
+        ).trim();
+        if (name) body.product_name = name;
+        if (barcode) body.product_barcode = barcode;
+      }
       if (selectedNode?.type === "terminal") body.terminal_id = selectedNode.id;
       if (selectedNode?.type === "cashier")  body.cashier_id  = selectedNode.id;
 
@@ -481,14 +605,44 @@ function PluPage() {
       if ((data as { success?: boolean; message?: string }).success === false) {
         setItemError((data as { message?: string }).message ?? "Hata."); return;
       }
-      setNewCode(""); await reloadGroups();
+      const activeId = activeGroup?.id;
+      setNewCode("");
+      await reloadGroups(activeId);
+
+      // GET bazen ad/barkod dönmez (serializer); ERP’den eklenen satırı hemen göster
+      if (typeof input !== "string" && activeId) {
+        const r = input as ErpProduct & Record<string, unknown>;
+        const name = String(input.name ?? r.product_name ?? "").trim();
+        const barcode = String(
+          input.barcode ?? r.barcode ?? r.product_barcode ?? ""
+        ).trim();
+        if (name || barcode) {
+          setGroups(prev =>
+            prev.map(g => {
+              if (g.id !== activeId) return g;
+              return {
+                ...g,
+                plu_items: g.plu_items.map(it =>
+                  it.product_code === productCode
+                    ? {
+                        ...it,
+                        ...(name ? { product_name: name } : {}),
+                        ...(barcode ? { product_barcode: barcode } : {}),
+                      }
+                    : it
+                ),
+              };
+            })
+          );
+        }
+      }
     } finally { setAddingItem(false); }
   };
 
   const deleteItem = async (itemId: string, code: string) => {
     if (!confirm(`"${code}" kodlu ürün bu gruptan kaldırılsın mı?`)) return;
     await apiFetch(`/plu/items/${itemId}`, { method: "DELETE" });
-    await reloadGroups();
+    await reloadGroups(activeGroup?.id);
   };
 
   // Item sıralama
@@ -515,7 +669,22 @@ function PluPage() {
       const res = await apiFetch(
         `/integration/products/search/${companyId}?q=${encodeURIComponent(q)}&page=${page}&limit=${SEARCH_LIMIT}`
       ) as { data?: ErpProduct[]; total?: number };
-      setSearchResults(Array.isArray(res.data) ? res.data : []);
+      const rawList = Array.isArray(res.data) ? res.data : [];
+      setSearchResults(
+        rawList.map((item) => {
+          const r = item as ErpProduct & Record<string, unknown>;
+          const mainUnitName =
+            typeof r.mainUnitName === "string" ? r.mainUnitName
+            : typeof r.main_unit_name === "string" ? r.main_unit_name
+            : undefined;
+          const vr = r.vatRate ?? r.vat_rate;
+          const vatRate =
+            typeof vr === "number" && !Number.isNaN(vr) ? vr
+            : typeof vr === "string" ? (parseFloat(vr) || undefined)
+            : undefined;
+          return { ...item, mainUnitName, vatRate };
+        })
+      );
       setSearchTotal(typeof res.total === "number" ? res.total : 0);
       setSearchPage(page);
     } catch { setSearchResults([]); }
@@ -523,10 +692,9 @@ function PluPage() {
   }, [companyId]);
 
   useEffect(() => {
-    if (!productSearch.trim()) { setSearchResults([]); setSearchTotal(0); setSearchPage(1); return; }
-    const t = setTimeout(() => void searchProducts(productSearch.trim(), 1), 400);
-    return () => clearTimeout(t);
-  }, [productSearch, searchProducts]);
+    if (!searchQuery.trim()) { setSearchResults([]); setSearchTotal(0); setSearchPage(1); return; }
+    void searchProducts(searchQuery.trim(), 1);
+  }, [searchQuery, searchProducts]);
 
   // Export
   async function exportPlu() {
@@ -585,7 +753,7 @@ function PluPage() {
 
       if (data.success) {
         setImportResult({ ok: true, text: `${data.imported}/${data.total} grup aktarıldı ✓` });
-        await reloadGroups();
+        await reloadGroups(activeGroup?.id);
       } else {
         setImportResult({ ok: false, text: data.message ?? "Aktarma başarısız." });
       }
@@ -772,27 +940,63 @@ function PluPage() {
               <span style={{ fontSize:15, fontWeight:600 }}>
                 Ürün Ekle — {currentGroup?.name}
               </span>
-              <button onClick={() => { setAddItemModal(false); setProductSearch(""); setSearchResults([]); }}
+              <button onClick={() => { setAddItemModal(false); setProductSearch(""); setSearchQuery(""); setSearchResults([]); setSearchTotal(0); }}
                 style={{ background:"none", border:"none", cursor:"pointer", fontSize:20, color:"#9E9E9E" }}>✕</button>
             </div>
             <div style={{ position:"relative" }}>
-              <input autoFocus value={productSearch} onChange={e => setProductSearch(e.target.value)}
-                placeholder="Ürün adı veya kodu ile ara..."
-                style={{ width:"100%", border:"1px solid #E0E0E0", borderRadius:10,
-                  padding:"10px 40px 10px 14px", fontSize:13, outline:"none", boxSizing:"border-box" }} />
-              {searchLoading && (
-                <div style={{ position:"absolute", right:12, top:"50%",
-                  transform:"translateY(-50%)", fontSize:11, color:"#9E9E9E" }}>⟳</div>
-              )}
+              <input
+                autoFocus
+                value={productSearch}
+                onChange={e => setProductSearch(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && productSearch.trim().length >= 2) {
+                    setSearchQuery(productSearch.trim());
+                  }
+                }}
+                placeholder="Ad, kod veya barkod — Enter ile ara"
+                style={{
+                  width:"100%", border:"1px solid #E0E0E0", borderRadius:10,
+                  padding:"10px 100px 10px 14px", fontSize:13,
+                  outline:"none", boxSizing:"border-box",
+                }}
+              />
+              <div style={{
+                position:"absolute", right:8, top:"50%", transform:"translateY(-50%)",
+                display:"flex", alignItems:"center", gap:4,
+              }}>
+                {searchLoading && <span style={{ fontSize:11, color:"#9E9E9E" }}>⟳</span>}
+                {productSearch && (
+                  <button type="button"
+                    onClick={() => { setProductSearch(""); setSearchQuery(""); setSearchResults([]); setSearchTotal(0); }}
+                    style={{ background:"none", border:"none", cursor:"pointer",
+                      fontSize:14, color:"#BDBDBD", padding:"2px 4px", lineHeight:1 }}>
+                    ✕
+                  </button>
+                )}
+                <button type="button"
+                  disabled={productSearch.trim().length < 2 || searchLoading}
+                  onClick={() => { if (productSearch.trim().length >= 2) setSearchQuery(productSearch.trim()); }}
+                  style={{
+                    background: productSearch.trim().length >= 2 && !searchLoading ? "#1565C0" : "#E5E7EB",
+                    color:      productSearch.trim().length >= 2 && !searchLoading ? "white" : "#9ca3af",
+                    border:"none", borderRadius:7, padding:"5px 12px",
+                    fontSize:12, fontWeight:600,
+                    cursor: productSearch.trim().length >= 2 && !searchLoading ? "pointer" : "default",
+                  }}>
+                  Ara
+                </button>
+              </div>
             </div>
             <div style={{ flex:1, overflowY:"auto", display:"flex",
               flexDirection:"column", gap:4, minHeight:200 }}>
-              {productSearch.trim().length < 2 && (
-                <div style={{ textAlign:"center", color:"#BDBDBD", padding:"32px 0", fontSize:13 }}>
-                  En az 2 karakter girin
+              {!searchQuery && (
+                <div style={{ textAlign:"center", padding:"40px 0" }}>
+                  <div style={{ fontSize:28, marginBottom:8 }}>🔍</div>
+                  <div style={{ fontSize:13, color:"#9E9E9E" }}>Ürün adı veya kodu yazın</div>
+                  <div style={{ fontSize:12, color:"#BDBDBD", marginTop:4 }}>Enter veya Ara butonuna basın</div>
                 </div>
               )}
-              {productSearch.trim().length >= 2 && !searchLoading && searchResults.length === 0 && (
+              {searchQuery && !searchLoading && searchResults.length === 0 && (
                 <div style={{ textAlign:"center", color:"#BDBDBD", padding:"32px 0", fontSize:13 }}>
                   Ürün bulunamadı
                 </div>
@@ -804,12 +1008,47 @@ function PluPage() {
                   onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background="#F8F9FF"}
                   onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background="white"}>
                   <div style={{ minWidth:0, flex:1 }}>
-                    <div style={{ fontSize:13, fontWeight:500, color:"#212121",
-                      whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                    <div style={{ fontSize:13, fontWeight:600, color:"#111827",
+                      whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", marginBottom:5 }}>
                       {p.name}
                     </div>
-                    <div style={{ fontSize:11, color:"#9E9E9E", fontFamily:"monospace", marginTop:2 }}>
-                      {p.code}{p.barcode ? ` · ${p.barcode}` : ""}
+                    <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+                      {p.code && (
+                        <span style={{
+                          fontSize:10, fontFamily:"monospace", fontWeight:700,
+                          background:"#F3F4F6", color:"#374151",
+                          padding:"2px 7px", borderRadius:4,
+                        }}>
+                          KOD: {p.code}
+                        </span>
+                      )}
+                      {p.barcode && (
+                        <span style={{
+                          fontSize:10, fontFamily:"monospace",
+                          background:"#EFF6FF", color:"#1D4ED8",
+                          padding:"2px 7px", borderRadius:4,
+                        }}>
+                          BARKOD: {p.barcode}
+                        </span>
+                      )}
+                      {p.mainUnitName && (
+                        <span style={{
+                          fontSize:10,
+                          background:"#F0FDF4", color:"#166534",
+                          padding:"2px 7px", borderRadius:4,
+                        }}>
+                          {p.mainUnitName}
+                        </span>
+                      )}
+                      {typeof p.vatRate === "number" && p.vatRate > 0 && (
+                        <span style={{
+                          fontSize:10,
+                          background:"#FFF7ED", color:"#9A3412",
+                          padding:"2px 7px", borderRadius:4,
+                        }}>
+                          KDV %{p.vatRate}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div style={{ display:"flex", alignItems:"center", gap:10,
@@ -819,7 +1058,7 @@ function PluPage() {
                         ? `${p.salesPriceTaxIncluded.toLocaleString("tr-TR", { minimumFractionDigits:2 })} ₺`
                         : "—"}
                     </span>
-                    <button onClick={() => void addItem(p.code)} disabled={addingItem}
+                    <button onClick={() => void addItem(p)} disabled={addingItem}
                       style={{ background:"#E3F2FD", border:"1px solid #90CAF9", borderRadius:7,
                         padding:"6px 12px", cursor:"pointer", fontSize:12, fontWeight:600,
                         color:"#1565C0", opacity:addingItem ? 0.6 : 1 }}>+ Ekle</button>
@@ -830,7 +1069,7 @@ function PluPage() {
             {searchTotal > SEARCH_LIMIT && (
               <div style={{ display:"flex", justifyContent:"space-between",
                 alignItems:"center", borderTop:"1px solid #F0F0F0", paddingTop:12 }}>
-                <button onClick={() => void searchProducts(productSearch.trim(), searchPage - 1)}
+                <button onClick={() => void searchProducts(searchQuery.trim(), searchPage - 1)}
                   disabled={searchPage <= 1}
                   style={{ background:"#F3F4F6", border:"1px solid #E0E0E0", borderRadius:6,
                     padding:"6px 12px", cursor:"pointer", fontSize:12,
@@ -838,7 +1077,7 @@ function PluPage() {
                 <span style={{ fontSize:12, color:"#9E9E9E" }}>
                   {searchPage}/{searchTotalPages} · {searchTotal} ürün
                 </span>
-                <button onClick={() => void searchProducts(productSearch.trim(), searchPage + 1)}
+                <button onClick={() => void searchProducts(searchQuery.trim(), searchPage + 1)}
                   disabled={searchPage >= searchTotalPages}
                   style={{ background:"#F3F4F6", border:"1px solid #E0E0E0", borderRadius:6,
                     padding:"6px 12px", cursor:"pointer", fontSize:12,

@@ -52,6 +52,32 @@ async function apiFetch<T = unknown>(path: string, options: RequestInit = {}): P
   return res.json() as Promise<T>;
 }
 
+type CariRow = { code: string; name: string };
+
+function normalizeCariRows(arr: unknown[]): CariRow[] {
+  return arr
+    .map((x) => {
+      const o = x as Record<string, unknown>;
+      const code = String(o.code ?? o.Code ?? o.id ?? o.customer_code ?? "").trim();
+      const name = String(o.name ?? o.Name ?? o.title ?? o.unvan ?? "").trim();
+      return { code, name };
+    })
+    .filter((c) => c.code.length > 0 || c.name.length > 0);
+}
+
+function parseCustomerListResponse(res: unknown): CariRow[] {
+  if (!res || typeof res !== "object") return [];
+  const r = res as Record<string, unknown>;
+  if (Array.isArray(r.data)) return normalizeCariRows(r.data);
+  const inner = r.data;
+  if (inner && typeof inner === "object" && Array.isArray((inner as Record<string, unknown>).data)) {
+    return normalizeCariRows((inner as Record<string, unknown>).data as unknown[]);
+  }
+  if (Array.isArray(r.customers)) return normalizeCariRows(r.customers);
+  if (Array.isArray(res as unknown[])) return normalizeCariRows(res as unknown[]);
+  return [];
+}
+
 function hexToSoft(hex: string): string {
   try {
     const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
@@ -171,6 +197,13 @@ function PosSettingsPage() {
   const [copyTo,   setCopyTo]   = useState<TreeNode | null>(null);
   const [copying,  setCopying]  = useState(false);
 
+  const [torbaCariId,   setTorbaCariId]   = useState("");
+  const [torbaCariName, setTorbaCariName] = useState("");
+  const [cariSearch,    setCariSearch]    = useState("");
+  const [cariResults,   setCariResults]   = useState<CariRow[]>([]);
+  const [cariLoading,   setCariLoading]   = useState(false);
+  const cariSearchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Veri yükleme
   const loadAll = useCallback(async () => {
     if (!companyId) return;
@@ -197,6 +230,17 @@ function PosSettingsPage() {
       if (node.workplaceId)         p.append("workplace_id", node.workplaceId);
 
       const d = await apiFetch<Record<string,unknown>>(`/pos-settings/resolve?${p.toString()}`);
+      if (node.type === "cashier") {
+        setTorbaCariId("");
+        setTorbaCariName("");
+        setCariSearch("");
+        setCariResults([]);
+      } else {
+        const tid = d.torba_cari_id != null ? String(d.torba_cari_id).trim() : "";
+        const tnm = d.torba_cari_name != null ? String(d.torba_cari_name).trim() : "";
+        setTorbaCariId(tid && tid !== "null" && tid !== "undefined" ? tid : "");
+        setTorbaCariName(tnm && tnm !== "null" && tnm !== "undefined" ? tnm : "");
+      }
       setSettings({
         showPrice:           Boolean(d.show_price            ?? true),
         showCode:            Boolean(d.show_code             ?? true),
@@ -220,7 +264,12 @@ function PosSettingsPage() {
       setSourceLabel(({ cashier:"Bu kasiyere özel ayar", terminal:"Bu kasaya özel ayar",
         workplace:"İşyerinden miras", company:"Firma genelinden miras",
         default:"Varsayılan ayarlar" } as Record<string,string>)[src] ?? src);
-    } catch { setSettings(DEFAULT); setSourceLabel("Yüklenemedi"); }
+    } catch {
+      setSettings(DEFAULT);
+      setSourceLabel("Yüklenemedi");
+      setTorbaCariId("");
+      setTorbaCariName("");
+    }
     finally  {
       if (node.type === "cashier") {
         setTab((prev) => (prev === "giris" ? "gorunum" : prev));
@@ -231,7 +280,14 @@ function PosSettingsPage() {
 
   useEffect(() => {
     if (selectedNode) void loadSettings(selectedNode);
-    else { setSettings(DEFAULT); setSourceLabel(null); }
+    else {
+      setSettings(DEFAULT);
+      setSourceLabel(null);
+      setTorbaCariId("");
+      setTorbaCariName("");
+      setCariSearch("");
+      setCariResults([]);
+    }
   }, [selectedNode, loadSettings]);
 
   // Kaydet
@@ -261,7 +317,11 @@ function PosSettingsPage() {
       body.login_with_code = settings.loginWithCode;
       body.login_with_card = settings.loginWithCard;
     }
-    if (selectedNode.type === "terminal") body.terminal_id = selectedNode.id;
+    if (selectedNode.type === "terminal") {
+      body.terminal_id     = selectedNode.id;
+      body.torba_cari_id   = torbaCariId.trim()   || null;
+      body.torba_cari_name = torbaCariName.trim() || null;
+    }
     if (selectedNode.type === "cashier")  body.cashier_id  = selectedNode.id;
     if (selectedNode.workplaceId)         body.workplace_id = selectedNode.workplaceId;
     try {
@@ -290,6 +350,12 @@ function PosSettingsPage() {
         font_size_name:settings.fontSizeName, font_size_price:settings.fontSizePrice, font_size_code:settings.fontSizeCode,
         login_with_code: settings.loginWithCode,
         login_with_card: settings.loginWithCard,
+        ...(selectedNode.type === "terminal"
+          ? {
+              torba_cari_id:   torbaCariId.trim()   || null,
+              torba_cari_name: torbaCariName.trim() || null,
+            }
+          : {}),
       },
     };
     const blob = new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
@@ -325,6 +391,8 @@ function PosSettingsPage() {
         loginWithCode:       Boolean(raw.login_with_code ?? settings.loginWithCode),
         loginWithCard:       Boolean(raw.login_with_card ?? settings.loginWithCard),
       });
+      setTorbaCariId(typeof raw.torba_cari_id === "string" ? raw.torba_cari_id : "");
+      setTorbaCariName(typeof raw.torba_cari_name === "string" ? raw.torba_cari_name : "");
       setImportResult({ ok:true, text:"Dosya yüklendi — kaydetmek için Kaydet'e bas." });
     } catch(e) { setImportResult({ ok:false, text:`Hata: ${String(e)}` }); }
     finally { setImporting(false); if (fileRef.current) fileRef.current.value=""; }
@@ -347,6 +415,10 @@ function PosSettingsPage() {
           login_with_code: settings.loginWithCode,
           login_with_card: settings.loginWithCard,
         } : {}),
+        ...(selectedNode?.type === "terminal" ? {
+          torba_cari_id:   torbaCariId.trim()   || null,
+          torba_cari_name: torbaCariName.trim() || null,
+        } : {}),
       };
       if (copyTo.type === "terminal") body.terminal_id = copyTo.id;
       if (copyTo.type === "cashier")  body.cashier_id  = copyTo.id;
@@ -361,6 +433,48 @@ function PosSettingsPage() {
   }
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setSettings(s => ({...s,[k]:v}));
+
+  const runCariSearch = useCallback(
+    async (q: string) => {
+      if (!companyId) return;
+      const t = q.trim();
+      if (t.length < 2) {
+        setCariResults([]);
+        return;
+      }
+      setCariLoading(true);
+      try {
+        let rows = parseCustomerListResponse(
+          await apiFetch<unknown>(
+            `/integration/customers/${companyId}?q=${encodeURIComponent(t)}`
+          )
+        );
+        if (rows.length === 0) {
+          const all = parseCustomerListResponse(
+            await apiFetch<unknown>(`/integration/customers/${companyId}`)
+          );
+          const lq = t.toLowerCase();
+          rows = all.filter(
+            (c) =>
+              c.name.toLowerCase().includes(lq) || c.code.toLowerCase().includes(lq)
+          );
+        }
+        setCariResults(rows.slice(0, 80));
+      } catch {
+        setCariResults([]);
+      } finally {
+        setCariLoading(false);
+      }
+    },
+    [companyId]
+  );
+
+  useEffect(
+    () => () => {
+      if (cariSearchDebounceRef.current) clearTimeout(cariSearchDebounceRef.current);
+    },
+    []
+  );
 
   const badge = sourceLabel ? (() => {
     if (sourceLabel.includes("özel"))       return {bg:"#E8F5E9",color:"#2E7D32",border:"#A5D6A7",icon:"✓"};
@@ -819,6 +933,86 @@ function PosSettingsPage() {
                     </div>
                   )}
                 </div>
+
+                {selectedNode?.type === "terminal" && (
+                  <div style={{ marginTop: 24 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 8 }}>
+                      Torba Cari
+                    </div>
+                    <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 12 }}>
+                      Cari seçilmeden yapılan satışlar Z raporu alındığında bu cariye fatura edilir.
+                    </div>
+
+                    {torbaCariName ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8,
+                        padding: "10px 14px", borderRadius: 8,
+                        background: "#F0FDF4", border: "1px solid #86EFAC" }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "#166534" }}>
+                          👤 {torbaCariName}
+                        </span>
+                        {torbaCariId ? (
+                          <span style={{ fontSize: 11, color: "#6B7280", fontFamily: "monospace" }}>
+                            {torbaCariId}
+                          </span>
+                        ) : null}
+                        <button type="button"
+                          onClick={() => { setTorbaCariId(""); setTorbaCariName(""); }}
+                          style={{ marginLeft: "auto", background: "none", border: "none",
+                            cursor: "pointer", fontSize: 13, color: "#9CA3AF" }}>
+                          ✕
+                        </button>
+                      </div>
+                    ) : (
+                      <div style={{ position: "relative" }}>
+                        <input
+                          value={cariSearch}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setCariSearch(v);
+                            if (cariSearchDebounceRef.current) clearTimeout(cariSearchDebounceRef.current);
+                            if (v.length < 2) {
+                              setCariResults([]);
+                              return;
+                            }
+                            cariSearchDebounceRef.current = setTimeout(() => {
+                              void runCariSearch(v);
+                            }, 320);
+                          }}
+                          placeholder="Cari ara..."
+                          style={{ width: "100%", border: "1px solid #E0E0E0", borderRadius: 8,
+                            padding: "8px 12px", fontSize: 13, outline: "none", boxSizing: "border-box" }}
+                        />
+                        {cariLoading && (
+                          <span style={{ position: "absolute", right: 10, top: "50%",
+                            transform: "translateY(-50%)", color: "#9CA3AF", fontSize: 12 }}>⟳</span>
+                        )}
+                        {cariResults.length > 0 && (
+                          <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 100,
+                            background: "white", border: "1px solid #E0E0E0", borderRadius: 8,
+                            boxShadow: "0 4px 12px rgba(0,0,0,0.1)", maxHeight: 200, overflowY: "auto" }}>
+                            {cariResults.map((c, idx) => (
+                              <div key={`${c.code}-${idx}`}
+                                onClick={() => {
+                                  setTorbaCariId(c.code);
+                                  setTorbaCariName(c.name);
+                                  setCariSearch("");
+                                  setCariResults([]);
+                                }}
+                                style={{ padding: "8px 14px", cursor: "pointer", fontSize: 13,
+                                  borderBottom: "1px solid #F9FAFB" }}
+                                onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = "#F5F8FF"; }}
+                                onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = "white"; }}>
+                                <span style={{ fontWeight: 500 }}>{c.name || "—"}</span>
+                                <span style={{ marginLeft: 8, fontSize: 11, color: "#9CA3AF",
+                                  fontFamily: "monospace" }}>{c.code}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {result&&(
                   <div style={{marginTop:12,padding:"12px 16px",borderRadius:8,fontSize:13,fontWeight:500,
