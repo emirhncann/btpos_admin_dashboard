@@ -236,7 +236,8 @@ function PosSettingsPage() {
         setCariSearch("");
         setCariResults([]);
       } else {
-        const tid = d.torba_cari_id != null ? String(d.torba_cari_id).trim() : "";
+        const rawTid = d.tstorba_cari_id ?? d.torba_cari_id;
+        const tid = rawTid != null ? String(rawTid).trim() : "";
         const tnm = d.torba_cari_name != null ? String(d.torba_cari_name).trim() : "";
         setTorbaCariId(tid && tid !== "null" && tid !== "undefined" ? tid : "");
         setTorbaCariName(tnm && tnm !== "null" && tnm !== "undefined" ? tnm : "");
@@ -318,9 +319,9 @@ function PosSettingsPage() {
       body.login_with_card = settings.loginWithCard;
     }
     if (selectedNode.type === "terminal") {
-      body.terminal_id     = selectedNode.id;
-      body.torba_cari_id   = torbaCariId.trim()   || null;
-      body.torba_cari_name = torbaCariName.trim() || null;
+      body.terminal_id       = selectedNode.id;
+      body.tstorba_cari_id   = torbaCariId.trim()   || null;
+      body.torba_cari_name   = torbaCariName.trim() || null;
     }
     if (selectedNode.type === "cashier")  body.cashier_id  = selectedNode.id;
     if (selectedNode.workplaceId)         body.workplace_id = selectedNode.workplaceId;
@@ -352,7 +353,7 @@ function PosSettingsPage() {
         login_with_card: settings.loginWithCard,
         ...(selectedNode.type === "terminal"
           ? {
-              torba_cari_id:   torbaCariId.trim()   || null,
+              tstorba_cari_id: torbaCariId.trim()   || null,
               torba_cari_name: torbaCariName.trim() || null,
             }
           : {}),
@@ -391,7 +392,14 @@ function PosSettingsPage() {
         loginWithCode:       Boolean(raw.login_with_code ?? settings.loginWithCode),
         loginWithCard:       Boolean(raw.login_with_card ?? settings.loginWithCard),
       });
-      setTorbaCariId(typeof raw.torba_cari_id === "string" ? raw.torba_cari_id : "");
+      {
+        const rawTid = raw.tstorba_cari_id ?? raw.torba_cari_id;
+        const tid =
+          rawTid != null && (typeof rawTid === "string" || typeof rawTid === "number")
+            ? String(rawTid).trim()
+            : "";
+        setTorbaCariId(tid);
+      }
       setTorbaCariName(typeof raw.torba_cari_name === "string" ? raw.torba_cari_name : "");
       setImportResult({ ok:true, text:"Dosya yüklendi — kaydetmek için Kaydet'e bas." });
     } catch(e) { setImportResult({ ok:false, text:`Hata: ${String(e)}` }); }
@@ -416,7 +424,7 @@ function PosSettingsPage() {
           login_with_card: settings.loginWithCard,
         } : {}),
         ...(selectedNode?.type === "terminal" ? {
-          torba_cari_id:   torbaCariId.trim()   || null,
+          tstorba_cari_id: torbaCariId.trim()   || null,
           torba_cari_name: torbaCariName.trim() || null,
         } : {}),
       };
