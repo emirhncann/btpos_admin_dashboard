@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useRef, type ReactNode, type CSSProperties } from "react";
 import { withAuth } from "@/components/withAuth";
 import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
+import { sendCommand } from "@/services/api";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
@@ -11,6 +12,8 @@ type NodeType = "terminal" | "cashier";
 type Tab = "gorunum" | "satis" | "iskonto" | "plu_grid" | "giris";
 type DuplicateItemAction = "increase_qty" | "add_new";
 type PluMode = "terminal" | "cashier";
+type PavoPrintWidth = "58mm" | "80mm";
+type PavoInvoiceType = "e_archive" | "paper";
 
 interface TreeNode { type: NodeType; id: string; label: string; workplaceId?: string }
 interface Workplace { id: string; name: string }
@@ -20,6 +23,7 @@ interface Cashier   { id: string; full_name: string; cashier_code: string }
 interface Settings {
   showPrice: boolean; showCode: boolean; showBarcode: boolean;
   duplicateItemAction: DuplicateItemAction; pluMode: PluMode;
+  invoiceType: PavoInvoiceType;
   minQtyPerLine: number;
   allowLineDiscount: boolean; allowDocDiscount: boolean;
   maxLineDiscountPct: number; maxDocDiscountPct: number;
@@ -87,7 +91,7 @@ function hexToSoft(hex: string): string {
 
 const DEFAULT: Settings = {
   showPrice: true, showCode: true, showBarcode: false,
-  duplicateItemAction: "increase_qty", pluMode: "terminal", minQtyPerLine: 1,
+  duplicateItemAction: "increase_qty", pluMode: "terminal", invoiceType: "e_archive", minQtyPerLine: 1,
   allowLineDiscount: true, allowDocDiscount: true,
   maxLineDiscountPct: 100, maxDocDiscountPct: 100,
   pluCols: 4, pluRows: 3, fontSizeName: 12, fontSizePrice: 13, fontSizeCode: 9,
@@ -183,6 +187,7 @@ function PosSettingsPage() {
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
 
   const [tab,          setTab]          = useState<Tab>("gorunum");
+  const [activeTab,    setActiveTab]    = useState<"general" | "payment">("general");
   const [settings,     setSettings]     = useState<Settings>(DEFAULT);
   const [sourceLabel,  setSourceLabel]  = useState<string | null>(null);
   const [loading,      setLoading]      = useState(false);
@@ -204,6 +209,88 @@ function PosSettingsPage() {
   const [cariLoading,   setCariLoading]   = useState(false);
   const cariSearchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const [pavoIp,         setPavoIp]         = useState("");
+  const [pavoPort,       setPavoPort]       = useState(9100);
+  const [pavoSerialNo,   setPavoSerialNo]   = useState("");
+  const [pavoTimeout,    setPavoTimeout]    = useState(30);
+  const [pavoPrintWidth, setPavoPrintWidth] = useState<PavoPrintWidth>("80mm");
+  const [pairingPavo,    setPairingPavo]    = useState(false);
+  const [pavoPairResult, setPavoPairResult] = useState<{ ok: boolean; message?: string } | null>(null);
+  const [savingPayment, setSavingPayment] = useState(false);
+
+  async function loadPavoSettings(terminalId: string) {
+    if (!companyId) return;
+    try {
+      const res = await apiFetch<unknown[]>(`/payment-devices/${companyId}/${terminalId}`);
+      const pavo = Array.isArray(res)
+        ? res.find((d: unknown) => (d as Record<string, unknown>).provider === "pavo")
+        : null;
+      if (pavo) {
+        const p = pavo as Record<string, unknown>;
+        setPavoIp(String(p.ip_address ?? ""));
+        setPavoPort(Number(p.port ?? 9100));
+        setPavoSerialNo(String(p.serial_no ?? ""));
+        setPavoTimeout(Number(p.card_read_timeout ?? 30));
+        setPavoPrintWidth((p.print_width as PavoPrintWidth) ?? "80mm");
+      } else {
+        setPavoIp("");
+        setPavoPort(9100);
+        setPavoSerialNo("");
+        setPavoTimeout(30);
+        setPavoPrintWidth("80mm");
+      }
+    } catch {
+      // Pavo ayarı yoksa varsayılan değerler korunur.
+    }
+  }
+
+  async function savePavoSettings(terminalId: string) {
+    if (!companyId) return;
+    await apiFetch(`/payment-devices/${companyId}/${terminalId}`, {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "pavo",
+        ip_address: pavoIp.trim() || null,
+        port: pavoPort,
+        serial_no: pavoSerialNo.trim() || null,
+        card_read_timeout: pavoTimeout,
+        print_width: pavoPrintWidth,
+        invoice_type: settings.invoiceType,
+      }),
+    });
+  }
+
+  async function handlePavoPair() {
+    if (!companyId || !selectedNode || selectedNode.type !== "terminal") return;
+    setPairingPavo(true);
+    setPavoPairResult(null);
+    try {
+      await savePavoSettings(selectedNode.id);
+      const cmd = await sendCommand({
+        company_id: companyId,
+        command: "pair_pavo",
+        payload: { ip: pavoIp, port: pavoPort, serial_no: pavoSerialNo },
+        send_to_all: false,
+        terminal_ids: [selectedNode.id],
+      });
+      setPavoPairResult({ ok: cmd.success, message: cmd.message });
+    } catch (e) {
+      setPavoPairResult({ ok: false, message: String(e) });
+    } finally {
+      setPairingPavo(false);
+    }
+  }
+
+  async function savePaymentSettings() {
+    if (!selectedNode || selectedNode.type !== "terminal") return;
+    setSavingPayment(true);
+    try {
+      await savePavoSettings(selectedNode.id);
+    } finally {
+      setSavingPayment(false);
+    }
+  }
+
   // Veri yükleme
   const loadAll = useCallback(async () => {
     if (!companyId) return;
@@ -223,6 +310,9 @@ function PosSettingsPage() {
   const loadSettings = useCallback(async (node: TreeNode) => {
     if (!companyId) return;
     setLoading(true); setResult(null); setImportResult(null);
+    if (node.type === "terminal") {
+      void loadPavoSettings(node.id);
+    }
     try {
       const p = new URLSearchParams({ company_id: companyId });
       if (node.type === "terminal") p.append("terminal_id", node.id);
@@ -248,6 +338,7 @@ function PosSettingsPage() {
         showBarcode:         Boolean(d.show_barcode          ?? false),
         duplicateItemAction: d.duplicate_item_action === "add_new" ? "add_new" : "increase_qty",
         pluMode:             d.plu_mode === "cashier" ? "cashier" : "terminal",
+        invoiceType:         d.invoice_type === "paper" ? "paper" : "e_archive",
         minQtyPerLine:       typeof d.min_qty_per_line === "number" ? d.min_qty_per_line : 1,
         allowLineDiscount:   Boolean(d.allow_line_discount   ?? true),
         allowDocDiscount:    Boolean(d.allow_doc_discount    ?? true),
@@ -288,8 +379,18 @@ function PosSettingsPage() {
       setTorbaCariName("");
       setCariSearch("");
       setCariResults([]);
+      setPavoIp("");
+      setPavoPort(9100);
+      setPavoSerialNo("");
+      setPavoTimeout(30);
+      setPavoPrintWidth("80mm");
+      setPavoPairResult(null);
     }
   }, [selectedNode, loadSettings]);
+
+  useEffect(() => {
+    setPavoPairResult(null);
+  }, [activeTab]);
 
   // Kaydet
   async function save() {
@@ -322,6 +423,7 @@ function PosSettingsPage() {
       body.terminal_id       = selectedNode.id;
       body.tstorba_cari_id   = torbaCariId.trim()   || null;
       body.torba_cari_name   = torbaCariName.trim() || null;
+      body.invoice_type      = settings.invoiceType;
     }
     if (selectedNode.type === "cashier")  body.cashier_id  = selectedNode.id;
     if (selectedNode.workplaceId)         body.workplace_id = selectedNode.workplaceId;
@@ -344,6 +446,7 @@ function PosSettingsPage() {
       settings:{
         show_price:settings.showPrice, show_code:settings.showCode, show_barcode:settings.showBarcode,
         duplicate_item_action:settings.duplicateItemAction, plu_mode:settings.pluMode,
+        invoice_type: settings.invoiceType,
         min_qty_per_line:settings.minQtyPerLine,
         allow_line_discount:settings.allowLineDiscount, allow_doc_discount:settings.allowDocDiscount,
         max_line_discount_pct:settings.maxLineDiscountPct, max_doc_discount_pct:settings.maxDocDiscountPct,
@@ -379,6 +482,7 @@ function PosSettingsPage() {
         showBarcode:         Boolean(raw.show_barcode          ?? settings.showBarcode),
         duplicateItemAction: raw.duplicate_item_action === "add_new" ? "add_new" : "increase_qty",
         pluMode:             raw.plu_mode === "cashier" ? "cashier" : "terminal",
+        invoiceType:         raw.invoice_type === "paper" ? "paper" : "e_archive",
         minQtyPerLine:       typeof raw.min_qty_per_line === "number" ? raw.min_qty_per_line : 1,
         allowLineDiscount:   Boolean(raw.allow_line_discount   ?? settings.allowLineDiscount),
         allowDocDiscount:    Boolean(raw.allow_doc_discount    ?? settings.allowDocDiscount),
@@ -414,7 +518,7 @@ function PosSettingsPage() {
       const body: Record<string,unknown> = {
         company_id:companyId, show_price:settings.showPrice, show_code:settings.showCode,
         show_barcode:settings.showBarcode, duplicate_item_action:settings.duplicateItemAction,
-        plu_mode:settings.pluMode, min_qty_per_line:settings.minQtyPerLine,
+        plu_mode:settings.pluMode, invoice_type: settings.invoiceType, min_qty_per_line:settings.minQtyPerLine,
         allow_line_discount:settings.allowLineDiscount, allow_doc_discount:settings.allowDocDiscount,
         max_line_discount_pct:settings.maxLineDiscountPct, max_doc_discount_pct:settings.maxDocDiscountPct,
         plu_cols:settings.pluCols, plu_rows:settings.pluRows,
@@ -441,6 +545,20 @@ function PosSettingsPage() {
   }
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setSettings(s => ({...s,[k]:v}));
+  const inputStyle: CSSProperties = {
+    width: "100%",
+    border: "1px solid #E0E0E0",
+    borderRadius: 8,
+    padding: "8px 12px",
+    fontSize: 13,
+    outline: "none",
+    boxSizing: "border-box",
+  };
+  const lbl = (text: string) => (
+    <label style={{ fontSize: 11, fontWeight: 600, color: "#6B7280", display: "block", marginBottom: 4 }}>
+      {text}
+    </label>
+  );
 
   const runCariSearch = useCallback(
     async (q: string) => {
@@ -586,7 +704,7 @@ function PosSettingsPage() {
                     const act=selectedNode?.id===t.id&&selectedNode.type==="terminal";
                     return (
                       <div key={t.id}
-                        onClick={()=>setSelectedNode({type:"terminal",id:t.id,label:t.terminal_name,workplaceId:wp.id})}
+                        onClick={()=>{ setSelectedNode({type:"terminal",id:t.id,label:t.terminal_name,workplaceId:wp.id}); setActiveTab("general"); }}
                         style={{display:"flex",alignItems:"center",gap:8,
                           padding:"8px 12px 8px 24px",cursor:"pointer",
                           background:act?"#F5F3FF":"white",
@@ -614,7 +732,7 @@ function PosSettingsPage() {
               const act=selectedNode?.id===c.id&&selectedNode.type==="cashier";
               return (
                 <div key={c.id}
-                  onClick={()=>setSelectedNode({type:"cashier",id:c.id,label:c.full_name})}
+                  onClick={()=>{ setSelectedNode({type:"cashier",id:c.id,label:c.full_name}); setActiveTab("general"); }}
                   style={{display:"flex",alignItems:"center",gap:8,padding:"7px 12px",cursor:"pointer",
                     background:act?"#ECFDF5":"white",
                     borderLeft:`3px solid ${act?"#10B981":"transparent"}`,
@@ -695,6 +813,29 @@ function PosSettingsPage() {
               {loading ? (
                 <div style={{textAlign:"center",padding:"48px 0",color:"#9ca3af",fontSize:13}}>Yükleniyor...</div>
               ) : (<>
+                {selectedNode?.type === "terminal" && (
+                  <div style={{ display: "flex", gap: 0, borderBottom: "2px solid #E5E7EB", marginBottom: 20 }}>
+                    {[
+                      { key: "general", label: "⚙️ Genel Ayarlar" },
+                      { key: "payment", label: "💳 Ödeme Cihazı" },
+                    ].map((tabItem) => (
+                      <button key={tabItem.key} type="button"
+                        onClick={() => setActiveTab(tabItem.key as typeof activeTab)}
+                        style={{
+                          padding: "10px 20px", fontSize: 13, fontWeight: activeTab === tabItem.key ? 700 : 400,
+                          background: "none", border: "none", cursor: "pointer",
+                          borderBottom: activeTab === tabItem.key ? "2px solid #1565C0" : "2px solid transparent",
+                          color: activeTab === tabItem.key ? "#1565C0" : "#6B7280",
+                          marginBottom: -2,
+                        }}>
+                        {tabItem.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {(selectedNode?.type !== "terminal" || activeTab === "general") && (
+                  <>
                 {/* Tabs */}
                 <div style={{display:"flex",gap:4,marginBottom:16,background:"#F3F4F6",borderRadius:10,padding:4}}>
                   {/* Kasiyer seciliyken "Giris Yontemi" sekmesi gizlenir */}
@@ -759,6 +900,74 @@ function PosSettingsPage() {
                           </button>
                         ))}
                       </div>
+                    </div>
+                    <div style={{ padding: "16px 0", borderBottom: "1px solid #F5F5F5" }}>
+                      <div style={{ fontSize: 14, fontWeight: 500, color: "#212121", marginBottom: 4 }}>
+                        Fatura Tipi
+                      </div>
+                      <div style={{ fontSize: 12, color: "#9E9E9E", marginBottom: 12 }}>
+                        Satış tamamlandığında İşbaşı'ya hangi fatura türü gönderilsin?
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                        {([
+                          {
+                            v: "e_archive" as const,
+                            l: "E-Arşiv / E-Fatura",
+                            desc: "İşbaşı entegrasyon API — otomatik",
+                            icon: "📧",
+                          },
+                          {
+                            v: "paper" as const,
+                            l: "Kağıt Fatura",
+                            desc: "PUT /api/v1.0/invoices — manuel baskı",
+                            icon: "🖨️",
+                          },
+                        ]).map((opt) => (
+                          <button
+                            key={opt.v}
+                            type="button"
+                            onClick={() => set("invoiceType", opt.v)}
+                            style={{
+                              padding: "12px 14px",
+                              borderRadius: 10,
+                              cursor: "pointer",
+                              textAlign: "left",
+                              border: `2px solid ${settings.invoiceType === opt.v ? "#1565C0" : "#E0E0E0"}`,
+                              background: settings.invoiceType === opt.v ? "#E3F2FD" : "white",
+                              transition: "all 0.15s",
+                            }}
+                          >
+                            <div style={{ fontSize: 18, marginBottom: 4 }}>{opt.icon}</div>
+                            <div
+                              style={{
+                                fontSize: 13,
+                                fontWeight: 600,
+                                color: settings.invoiceType === opt.v ? "#1565C0" : "#374151",
+                                marginBottom: 3,
+                              }}
+                            >
+                              {opt.l}
+                            </div>
+                            <div style={{ fontSize: 11, color: "#9E9E9E" }}>{opt.desc}</div>
+                          </button>
+                        ))}
+                      </div>
+
+                      {settings.invoiceType === "paper" && (
+                        <div
+                          style={{
+                            marginTop: 10,
+                            padding: "10px 14px",
+                            background: "#FFF8E1",
+                            border: "1px solid #FFE082",
+                            borderRadius: 8,
+                            fontSize: 12,
+                            color: "#F57F17",
+                          }}
+                        >
+                          ⚠️ Kağıt fatura için Pavo ödeme terminali bağlı olmalı ve birim kodları "Birim Eşleştirme" sayfasından tanımlanmış olmalıdır.
+                        </div>
+                      )}
                     </div>
                   </>)}
 
@@ -941,8 +1150,10 @@ function PosSettingsPage() {
                     </div>
                   )}
                 </div>
+                  </>
+                )}
 
-                {selectedNode?.type === "terminal" && (
+                {selectedNode?.type === "terminal" && (selectedNode?.type !== "terminal" || activeTab === "general") && (
                   <div style={{ marginTop: 24 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 8 }}>
                       Torba Cari
@@ -1022,7 +1233,81 @@ function PosSettingsPage() {
                   </div>
                 )}
 
-                {result&&(
+                {selectedNode?.type === "terminal" && activeTab === "payment" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                    <div style={{ padding: "16px 20px", background: "#F8FAFF", border: "1px solid #C7D7FF", borderRadius: 12 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#1D4ED8", marginBottom: 16 }}>
+                        💳 Pavo Ödeme Cihazı
+                      </div>
+
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                        <div style={{ gridColumn: "span 2" }}>
+                          {lbl("IP Adresi")}
+                          <input value={pavoIp} onChange={(e) => setPavoIp(e.target.value)} placeholder="192.168.1.100" style={inputStyle} />
+                        </div>
+
+                        <div>
+                          {lbl("Port")}
+                          <input type="number" value={pavoPort} onChange={(e) => setPavoPort(Number(e.target.value))} placeholder="9100" style={inputStyle} />
+                        </div>
+
+                        <div>
+                          {lbl("Seri No")}
+                          <input value={pavoSerialNo} onChange={(e) => setPavoSerialNo(e.target.value)} placeholder="PAV860085386" style={inputStyle} />
+                        </div>
+
+                        <div>
+                          {lbl("Kart Okuma Zaman Aşımı (sn)")}
+                          <input type="number" value={pavoTimeout} onChange={(e) => setPavoTimeout(Number(e.target.value))} placeholder="30" style={inputStyle} />
+                        </div>
+
+                        <div>
+                          {lbl("Fiş Genişliği")}
+                          <div style={{ display: "flex", gap: 8 }}>
+                            {(["58mm", "80mm"] as const).map((w) => (
+                              <button key={w} type="button" onClick={() => setPavoPrintWidth(w)}
+                                style={{ flex: 1, padding: "8px", borderRadius: 8, border: "1px solid",
+                                  background: pavoPrintWidth === w ? "#EFF6FF" : "white",
+                                  borderColor: pavoPrintWidth === w ? "#3B82F6" : "#E0E0E0",
+                                  color: pavoPrintWidth === w ? "#1D4ED8" : "#6B7280",
+                                  fontWeight: pavoPrintWidth === w ? 600 : 400,
+                                  fontSize: 13, cursor: "pointer" }}>
+                                {w}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", gap: 8, marginTop: 16, alignItems: "center" }}>
+                        <button type="button" onClick={() => void savePaymentSettings()}
+                          disabled={savingPayment}
+                          style={{ background: savingPayment ? "#93C5FD" : "#1565C0", color: "white",
+                            border: "none", borderRadius: 8, padding: "9px 20px",
+                            fontSize: 13, fontWeight: 600, cursor: savingPayment ? "wait" : "pointer" }}>
+                          {savingPayment ? "Kaydediliyor..." : "Kaydet"}
+                        </button>
+
+                        <button type="button" onClick={() => void handlePavoPair()}
+                          disabled={!pavoIp || pairingPavo}
+                          style={{ padding: "9px 18px", borderRadius: 8, border: "1px solid #90CAF9",
+                            background: "#E3F2FD", color: "#1565C0", fontSize: 13, fontWeight: 600,
+                            cursor: !pavoIp || pairingPavo ? "default" : "pointer",
+                            opacity: !pavoIp || pairingPavo ? 0.5 : 1 }}>
+                          {pairingPavo ? "⟳ Eşleştiriliyor..." : "🔗 Eşleştir"}
+                        </button>
+
+                        {pavoPairResult && (
+                          <span style={{ fontSize: 12, color: pavoPairResult.ok ? "#2E7D32" : "#C62828" }}>
+                            {pavoPairResult.ok ? "✓ Eşleştirme başarılı" : `✗ ${pavoPairResult.message}`}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {(selectedNode?.type !== "terminal" || activeTab === "general") && result&&(
                   <div style={{marginTop:12,padding:"12px 16px",borderRadius:8,fontSize:13,fontWeight:500,
                     background:result.ok?"#F0FDF4":"#FEF2F2",
                     border:`1px solid ${result.ok?"#BBF7D0":"#FECACA"}`,
@@ -1031,12 +1316,14 @@ function PosSettingsPage() {
                   </div>
                 )}
 
-                <button type="button" onClick={()=>void save()} disabled={saving}
-                  style={{marginTop:16,width:"100%",padding:"14px",borderRadius:10,
-                    background:saving?"#E0E0E0":"#1565C0",color:saving?"#9E9E9E":"white",
-                    border:"none",cursor:saving?"default":"pointer",fontSize:14,fontWeight:600}}>
-                  {saving?"Kaydediliyor...":"Kaydet"}
-                </button>
+                {(selectedNode?.type !== "terminal" || activeTab === "general") && (
+                  <button type="button" onClick={()=>void save()} disabled={saving}
+                    style={{marginTop:16,width:"100%",padding:"14px",borderRadius:10,
+                      background:saving?"#E0E0E0":"#1565C0",color:saving?"#9E9E9E":"white",
+                      border:"none",cursor:saving?"default":"pointer",fontSize:14,fontWeight:600}}>
+                    {saving?"Kaydediliyor...":"Kaydet"}
+                  </button>
+                )}
               </>)}
             </div>
           )}

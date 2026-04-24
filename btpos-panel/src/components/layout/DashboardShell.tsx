@@ -109,6 +109,11 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: "/dashboard/unit-mappings",
+    label: "Birim Eşleme",
+    icon: "⚖️",
+  },
+  {
     href: "/dashboard/plu",
     label: "PLU Yönetimi",
     icon: (
