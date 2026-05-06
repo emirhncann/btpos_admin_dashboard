@@ -338,7 +338,7 @@ function PosSettingsPage() {
         showBarcode:         Boolean(d.show_barcode          ?? false),
         duplicateItemAction: d.duplicate_item_action === "add_new" ? "add_new" : "increase_qty",
         pluMode:             d.plu_mode === "cashier" ? "cashier" : "terminal",
-        invoiceType:         d.invoice_type === "paper" ? "paper" : "e_archive",
+        invoiceType:         (d.invoice_type as PavoInvoiceType) ?? "e_archive",
         minQtyPerLine:       typeof d.min_qty_per_line === "number" ? d.min_qty_per_line : 1,
         allowLineDiscount:   Boolean(d.allow_line_discount   ?? true),
         allowDocDiscount:    Boolean(d.allow_doc_discount    ?? true),
@@ -406,7 +406,7 @@ function PosSettingsPage() {
       show_price: settings.showPrice, show_code: settings.showCode,
       show_barcode: settings.showBarcode,
       duplicate_item_action: settings.duplicateItemAction,
-      plu_mode: settings.pluMode, min_qty_per_line: settings.minQtyPerLine,
+      plu_mode: settings.pluMode, invoice_type: settings.invoiceType, min_qty_per_line: settings.minQtyPerLine,
       allow_line_discount: settings.allowLineDiscount,
       allow_doc_discount: settings.allowDocDiscount,
       max_line_discount_pct: settings.maxLineDiscountPct,
@@ -423,11 +423,13 @@ function PosSettingsPage() {
       body.terminal_id       = selectedNode.id;
       body.tstorba_cari_id   = torbaCariId.trim()   || null;
       body.torba_cari_name   = torbaCariName.trim() || null;
-      body.invoice_type      = settings.invoiceType;
     }
     if (selectedNode.type === "cashier")  body.cashier_id  = selectedNode.id;
     if (selectedNode.workplaceId)         body.workplace_id = selectedNode.workplaceId;
     try {
+      if (selectedNode.type === "terminal") {
+        await savePavoSettings(selectedNode.id);
+      }
       const d = await apiFetch<{ success?: boolean; message?: string }>(
         "/pos-settings/save", { method:"POST", body:JSON.stringify(body) }
       );
