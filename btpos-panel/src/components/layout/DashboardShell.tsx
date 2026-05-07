@@ -114,6 +114,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: "⚖️",
   },
   {
+    href: "/dashboard/payment-accounts",
+    label: "Ödeme Hesapları",
+    icon: "💳",
+  },
+  {
     href: "/dashboard/plu",
     label: "PLU Yönetimi",
     icon: (
