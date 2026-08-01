@@ -17,6 +17,30 @@ interface Cashier {
   is_active: boolean;
   created_at: string;
   card_number?: string | null;
+  allow_all_terminals?: boolean;
+  terminal_access_count?: number;
+}
+
+interface Terminal {
+  id: string;
+  terminal_name: string;
+  workplace_id: string;
+  is_installed: boolean;
+}
+
+interface Workplace {
+  id: string;
+  name: string;
+}
+
+interface CashierTerminalAccess {
+  terminal_id: string;
+  terminals: {
+    id: string;
+    terminal_name: string;
+    workplace_id: string;
+    workplaces: { name: string };
+  };
 }
 
 interface AddForm {
@@ -399,6 +423,16 @@ function CashiersPage() {
   const [editingCard, setEditingCard]           = useState<string | null>(null);
   const [cardInput, setCardInput]               = useState("");
   const [savingCard, setSavingCard]             = useState(false);
+  const [terminals, setTerminals]               = useState<Terminal[]>([]);
+  const [workplaces, setWorkplaces]             = useState<Workplace[]>([]);
+  const [accessModal, setAccessModal]           = useState<{
+    cashier: Cashier;
+    allowAll: boolean;
+    selectedIds: string[];
+    originalIds: string[];
+    saving: boolean;
+  } | null>(null);
+  const [accessCounts, setAccessCounts]         = useState<Record<string, number>>({});
 
   const companyId = getCompanyId();
 
@@ -417,12 +451,75 @@ function CashiersPage() {
     }
   }, [companyId]);
 
-  useEffect(() => { fetchCashiers(); }, [fetchCashiers]);
+  useEffect(() => { void fetchCashiers(); }, [fetchCashiers]);
+
+  useEffect(() => {
+    if (!companyId) return;
+    void Promise.all([
+      apiFetch<Terminal[]>(`/management/licenses/terminals/${companyId}`),
+      apiFetch<Workplace[]>(`/workplaces/${companyId}`),
+    ]).then(([termData, wpData]) => {
+      setTerminals((Array.isArray(termData) ? termData : []).filter((t) => t.is_installed));
+      setWorkplaces(Array.isArray(wpData) ? wpData : []);
+    }).catch(() => {
+      setTerminals([]);
+      setWorkplaces([]);
+    });
+  }, [companyId]);
 
   const filtered = cashiers.filter((c) =>
     c.full_name.toLowerCase().includes(search.toLowerCase()) ||
     c.cashier_code.includes(search)
   );
+
+  async function openAccessModal(cashier: Cashier) {
+    if (!companyId) return;
+    try {
+      const data = await apiFetch<CashierTerminalAccess[]>(
+        `/cashiers/${companyId}/${cashier.id}/terminals`
+      );
+      const ids = (Array.isArray(data) ? data : []).map((d) => d.terminal_id);
+      setAccessCounts((prev) => ({ ...prev, [cashier.id]: ids.length }));
+      setAccessModal({
+        cashier,
+        allowAll: cashier.allow_all_terminals ?? true,
+        selectedIds: ids,
+        originalIds: ids,
+        saving: false,
+      });
+    } catch {
+      setAccessModal({
+        cashier,
+        allowAll: cashier.allow_all_terminals ?? true,
+        selectedIds: [],
+        originalIds: [],
+        saving: false,
+      });
+    }
+  }
+
+  async function saveAccess() {
+    if (!accessModal || !companyId) return;
+    setAccessModal((m) => (m ? { ...m, saving: true } : m));
+    try {
+      await apiFetch(`/cashiers/${companyId}/${accessModal.cashier.id}/terminals`, {
+        method: "PUT",
+        body: JSON.stringify({
+          allow_all_terminals: accessModal.allowAll,
+          terminal_ids: accessModal.selectedIds,
+        }),
+      });
+      setAccessCounts((prev) => ({
+        ...prev,
+        [accessModal.cashier.id]: accessModal.selectedIds.length,
+      }));
+      setAccessModal(null);
+      void fetchCashiers();
+    } catch {
+      setAccessModal((m) => (m ? { ...m, saving: false } : m));
+      setFetchError("Kasa erişimi kaydedilemedi.");
+    }
+  }
 
   async function viewProfile(cashier: Cashier) {
     setProfileLoading(true);
@@ -798,7 +895,16 @@ function CashiersPage() {
                           ${c.role === "manager" ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"}`}>
                           {c.full_name.charAt(0).toUpperCase()}
                         </div>
-                        <span className="font-medium text-gray-900">{c.full_name}</span>
+                        <div>
+                          <span className="font-medium text-gray-900">{c.full_name}</span>
+                          <div>
+                            <span style={{ fontSize: 10, color: "#9CA3AF" }}>
+                              {c.allow_all_terminals !== false
+                                ? "Tüm kasalar"
+                                : `${accessCounts[c.id] ?? c.terminal_access_count ?? 0} kasa`}
+                            </span>
+                          </div>
+                        </div>
                       </div>
                     </td>
                     <td className="px-5 py-3.5">
@@ -827,7 +933,7 @@ function CashiersPage() {
                       })}
                     </td>
                     <td className="px-5 py-3.5">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <button
                           onClick={() => void viewProfile(c)}
                           style={{
@@ -847,6 +953,20 @@ function CashiersPage() {
                           }}
                         >
                           Kopyala
+                        </button>
+                        <button
+                          onClick={() => void openAccessModal(c)}
+                          style={{
+                            padding: "5px 10px",
+                            borderRadius: 6,
+                            border: "1px solid #E5E7EB",
+                            background: "#F9FAFB",
+                            fontSize: 11,
+                            color: "#374151",
+                            cursor: "pointer",
+                          }}
+                        >
+                          🖥 Kasa Erişimi
                         </button>
                       </div>
                       {editingCard === c.id ? (
@@ -923,6 +1043,147 @@ function CashiersPage() {
           onClose={() => setShowModal(false)}
           onSuccess={fetchCashiers}
         />
+      )}
+
+      {accessModal && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9999,
+          background: "rgba(0,0,0,0.45)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{
+            background: "white", borderRadius: 16, padding: 24,
+            width: "min(520px, 95vw)", maxHeight: "85vh",
+            display: "flex", flexDirection: "column", gap: 14,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>Kasa Erişimi</div>
+                <div style={{ fontSize: 12, color: "#6B7280", marginTop: 2 }}>
+                  {accessModal.cashier.full_name} · {accessModal.cashier.cashier_code}
+                </div>
+              </div>
+              <button type="button" onClick={() => setAccessModal(null)}
+                style={{ background: "none", border: "none", fontSize: 20,
+                  color: "#9CA3AF", cursor: "pointer" }}>✕</button>
+            </div>
+
+            <div
+              onClick={() => setAccessModal((m) => (m ? { ...m, allowAll: !m.allowAll } : m))}
+              style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                padding: "12px 14px", borderRadius: 10,
+                border: `1.5px solid ${accessModal.allowAll ? "#BFDBFE" : "#E5E7EB"}`,
+                background: accessModal.allowAll ? "#EFF6FF" : "#F9FAFB",
+                cursor: "pointer",
+              }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600,
+                  color: accessModal.allowAll ? "#1565C0" : "#374151" }}>
+                  Tüm Kasalara Erişim
+                </div>
+                <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>
+                  {accessModal.allowAll
+                    ? "Bu kasiyer tüm kasalarda giriş yapabilir"
+                    : "Sadece seçili kasalarda giriş yapabilir"}
+                </div>
+              </div>
+              <div style={{
+                width: 42, height: 24, borderRadius: 12,
+                background: accessModal.allowAll ? "#1565C0" : "#E5E7EB",
+                position: "relative", transition: "background 0.2s", flexShrink: 0,
+              }}>
+                <div style={{
+                  position: "absolute", top: 3, width: 18, height: 18,
+                  borderRadius: "50%", background: "white",
+                  left: accessModal.allowAll ? 21 : 3, transition: "left 0.2s",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                }} />
+              </div>
+            </div>
+
+            {!accessModal.allowAll && (
+              <div style={{ flex: 1, overflowY: "auto" }}>
+                <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 8, fontWeight: 600 }}>
+                  Erişim Verilecek Kasalar
+                </div>
+
+                {workplaces.map((wp) => {
+                  const wpTerminals = terminals.filter((t) => t.workplace_id === wp.id);
+                  if (wpTerminals.length === 0) return null;
+                  return (
+                    <div key={wp.id} style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#374151",
+                        padding: "4px 0", borderBottom: "1px solid #F3F4F6",
+                        marginBottom: 6 }}>
+                        📍 {wp.name}
+                      </div>
+                      {wpTerminals.map((t) => {
+                        const checked = accessModal.selectedIds.includes(t.id);
+                        return (
+                          <div
+                            key={t.id}
+                            onClick={() => setAccessModal((m) => {
+                              if (!m) return m;
+                              const ids = checked
+                                ? m.selectedIds.filter((id) => id !== t.id)
+                                : [...m.selectedIds, t.id];
+                              return { ...m, selectedIds: ids };
+                            })}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 10,
+                              padding: "8px 10px", borderRadius: 8, cursor: "pointer",
+                              marginBottom: 4,
+                              background: checked ? "#F0FDF4" : "white",
+                              border: `1px solid ${checked ? "#86EFAC" : "#E5E7EB"}`,
+                            }}>
+                            <div style={{
+                              width: 18, height: 18, borderRadius: 4, flexShrink: 0,
+                              border: `2px solid ${checked ? "#10B981" : "#D1D5DB"}`,
+                              background: checked ? "#10B981" : "white",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                            }}>
+                              {checked && <span style={{ color: "white", fontSize: 11 }}>✓</span>}
+                            </div>
+                            <span style={{ fontSize: 13, color: "#374151" }}>
+                              🖥 {t.terminal_name}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+
+                {terminals.length === 0 && (
+                  <div style={{ textAlign: "center", color: "#9CA3AF",
+                    padding: "24px 0", fontSize: 12 }}>
+                    Kurulu kasa bulunamadı
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+              <button type="button" onClick={() => setAccessModal(null)}
+                style={{ flex: 1, padding: "10px", borderRadius: 9,
+                  border: "1px solid #E5E7EB", background: "#F9FAFB",
+                  fontSize: 13, cursor: "pointer", color: "#6B7280" }}>
+                İptal
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveAccess()}
+                disabled={accessModal.saving}
+                style={{ flex: 2, padding: "10px", borderRadius: 9,
+                  border: "none", background: "#111827",
+                  color: "white", fontWeight: 700, fontSize: 13,
+                  cursor: "pointer", opacity: accessModal.saving ? 0.7 : 1 }}>
+                {accessModal.saving ? "Kaydediliyor..." : "Kaydet"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

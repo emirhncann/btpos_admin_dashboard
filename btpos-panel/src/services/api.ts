@@ -1,4 +1,4 @@
-import { TOKEN_KEY, triggerForceLogout } from "@/context/AuthContext";
+import { TOKEN_KEY, USER_KEY, triggerForceLogout } from "@/context/AuthContext";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
@@ -57,6 +57,42 @@ export const apiRequest = async <T = unknown>(
 
   return response.json();
 };
+
+/** Oturumdaki kullanıcının company_id değeri */
+export function getCompanyId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    if (!raw) return null;
+    const user = JSON.parse(raw) as { company_id?: number | string };
+    return user?.company_id != null ? String(user.company_id) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `{company_id}` yer tutucusunu gerçek şirket kimliği ile değiştirir */
+export function resolveCompanyEndpoint(
+  endpoint: string,
+  companyId?: string | null
+): string {
+  const cid = companyId ?? getCompanyId();
+  if (!cid) throw new Error("Şirket bilgisi bulunamadı.");
+  return endpoint.replace("{company_id}", cid);
+}
+
+/**
+ * Korumalı API — yanıt gövdesindeki `data` alanını döndürür.
+ * Endpoint içinde `{company_id}` kullanılabilir.
+ */
+export async function apiFetch<T = unknown>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const resolved = resolveCompanyEndpoint(endpoint);
+  const res = await apiRequest<T>(resolved, options);
+  return (((res as { data?: unknown }).data ?? res) as unknown) as T;
+}
 
 // ─── Logo İşbaşı API Kuralları ────────────────────────────────────────────────
 // Swagger'a göre:

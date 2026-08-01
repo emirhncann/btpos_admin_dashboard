@@ -14,6 +14,8 @@ type DuplicateItemAction = "increase_qty" | "add_new";
 type PluMode = "terminal" | "cashier";
 type PavoPrintWidth = "58mm" | "80mm";
 type PavoInvoiceType = "e_archive" | "paper";
+type PrintBehaviorMode = "ask" | "default" | "none";
+type PrintBehaviorKey = "satis" | "tahsilat" | "odeme";
 
 interface TreeNode { type: NodeType; id: string; label: string; workplaceId?: string }
 interface Workplace { id: string; name: string }
@@ -31,6 +33,37 @@ interface Settings {
   fontSizeName: number; fontSizePrice: number; fontSizeCode: number;
   loginWithCode: boolean;
   loginWithCard: boolean;
+  touchKeyboard: boolean;
+  customerDisplay: boolean;
+  allowExitWithHeldDocs: boolean;
+  cariPaymentUsePavo: boolean;
+  printBehavior: Record<PrintBehaviorKey, PrintBehaviorMode>;
+}
+
+const DEFAULT_PRINT_BEHAVIOR: Record<PrintBehaviorKey, PrintBehaviorMode> = {
+  satis: "ask",
+  tahsilat: "ask",
+  odeme: "ask",
+};
+
+function parsePrintBehavior(raw: unknown): Record<PrintBehaviorKey, PrintBehaviorMode> {
+  const pb =
+    typeof raw === "string"
+      ? (() => {
+          try {
+            return JSON.parse(raw) as Record<string, unknown>;
+          } catch {
+            return {};
+          }
+        })()
+      : raw && typeof raw === "object"
+        ? (raw as Record<string, unknown>)
+        : {};
+  const pick = (k: PrintBehaviorKey): PrintBehaviorMode => {
+    const v = pb[k];
+    return v === "default" || v === "none" ? v : "ask";
+  };
+  return { satis: pick("satis"), tahsilat: pick("tahsilat"), odeme: pick("odeme") };
 }
 
 // ─── Yardımcılar ─────────────────────────────────────────────────────────────
@@ -96,6 +129,11 @@ const DEFAULT: Settings = {
   maxLineDiscountPct: 100, maxDocDiscountPct: 100,
   pluCols: 4, pluRows: 3, fontSizeName: 12, fontSizePrice: 13, fontSizeCode: 9,
   loginWithCode: true, loginWithCard: false,
+  touchKeyboard: true,
+  customerDisplay: true,
+  allowExitWithHeldDocs: true,
+  cariPaymentUsePavo: false,
+  printBehavior: { ...DEFAULT_PRINT_BEHAVIOR },
 };
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
@@ -282,10 +320,29 @@ function PosSettingsPage() {
   }
 
   async function savePaymentSettings() {
-    if (!selectedNode || selectedNode.type !== "terminal") return;
+    if (!selectedNode || selectedNode.type !== "terminal" || !companyId) return;
     setSavingPayment(true);
+    setResult(null);
     try {
       await savePavoSettings(selectedNode.id);
+      const body: Record<string, unknown> = {
+        company_id: companyId,
+        terminal_id: selectedNode.id,
+        cari_payment_use_pavo: settings.cariPaymentUsePavo,
+      };
+      if (selectedNode.workplaceId) body.workplace_id = selectedNode.workplaceId;
+      const d = await apiFetch<{ success?: boolean; message?: string }>(
+        "/pos-settings/save",
+        { method: "POST", body: JSON.stringify(body) }
+      );
+      if (d.success) {
+        setResult({ ok: true, text: "Ödeme ayarları kaydedildi ✓" });
+        void loadSettings(selectedNode);
+      } else {
+        setResult({ ok: false, text: d.message ?? "Kayıt başarısız." });
+      }
+    } catch {
+      setResult({ ok: false, text: "Sunucuya ulaşılamadı." });
     } finally {
       setSavingPayment(false);
     }
@@ -351,6 +408,11 @@ function PosSettingsPage() {
         fontSizeCode:        typeof d.font_size_code  === "number" ? d.font_size_code  : 9,
         loginWithCode:       Boolean(d.login_with_code       ?? true),
         loginWithCard:       Boolean(d.login_with_card       ?? false),
+        touchKeyboard:       Boolean(d.touch_keyboard        ?? true),
+        customerDisplay:     Boolean(d.customer_display      ?? true),
+        allowExitWithHeldDocs: Boolean(d.allow_exit_with_held_docs ?? true),
+        cariPaymentUsePavo:  Boolean(d.cari_payment_use_pavo ?? false),
+        printBehavior:       parsePrintBehavior(d.print_behavior),
       });
       const src = String(d.source ?? "default");
       setSourceLabel(({ cashier:"Bu kasiyere özel ayar", terminal:"Bu kasaya özel ayar",
@@ -414,6 +476,11 @@ function PosSettingsPage() {
       plu_cols: settings.pluCols, plu_rows: settings.pluRows,
       font_size_name: settings.fontSizeName, font_size_price: settings.fontSizePrice,
       font_size_code: settings.fontSizeCode,
+      touch_keyboard: settings.touchKeyboard,
+      customer_display: settings.customerDisplay,
+      allow_exit_with_held_docs: settings.allowExitWithHeldDocs,
+      cari_payment_use_pavo: settings.cariPaymentUsePavo,
+      print_behavior: settings.printBehavior,
     };
     if (selectedNode?.type !== "cashier") {
       body.login_with_code = settings.loginWithCode;
@@ -454,6 +521,10 @@ function PosSettingsPage() {
         max_line_discount_pct:settings.maxLineDiscountPct, max_doc_discount_pct:settings.maxDocDiscountPct,
         plu_cols:settings.pluCols, plu_rows:settings.pluRows,
         font_size_name:settings.fontSizeName, font_size_price:settings.fontSizePrice, font_size_code:settings.fontSizeCode,
+        customer_display: settings.customerDisplay,
+        allow_exit_with_held_docs: settings.allowExitWithHeldDocs,
+        cari_payment_use_pavo: settings.cariPaymentUsePavo,
+        print_behavior: settings.printBehavior,
         login_with_code: settings.loginWithCode,
         login_with_card: settings.loginWithCard,
         ...(selectedNode.type === "terminal"
@@ -497,6 +568,11 @@ function PosSettingsPage() {
         fontSizeCode:        typeof raw.font_size_code  === "number" ? raw.font_size_code  : 9,
         loginWithCode:       Boolean(raw.login_with_code ?? settings.loginWithCode),
         loginWithCard:       Boolean(raw.login_with_card ?? settings.loginWithCard),
+        touchKeyboard:       Boolean(raw.touch_keyboard ?? settings.touchKeyboard),
+        customerDisplay:     Boolean(raw.customer_display ?? settings.customerDisplay),
+        allowExitWithHeldDocs: Boolean(raw.allow_exit_with_held_docs ?? settings.allowExitWithHeldDocs),
+        cariPaymentUsePavo:  Boolean(raw.cari_payment_use_pavo ?? settings.cariPaymentUsePavo),
+        printBehavior:       parsePrintBehavior(raw.print_behavior ?? settings.printBehavior),
       });
       {
         const rawTid = raw.tstorba_cari_id ?? raw.torba_cari_id;
@@ -525,6 +601,10 @@ function PosSettingsPage() {
         max_line_discount_pct:settings.maxLineDiscountPct, max_doc_discount_pct:settings.maxDocDiscountPct,
         plu_cols:settings.pluCols, plu_rows:settings.pluRows,
         font_size_name:settings.fontSizeName, font_size_price:settings.fontSizePrice, font_size_code:settings.fontSizeCode,
+        customer_display: settings.customerDisplay,
+        allow_exit_with_held_docs: settings.allowExitWithHeldDocs,
+        cari_payment_use_pavo: settings.cariPaymentUsePavo,
+        print_behavior: settings.printBehavior,
         ...(selectedNode?.type !== "cashier" ? {
           login_with_code: settings.loginWithCode,
           login_with_card: settings.loginWithCard,
@@ -856,6 +936,22 @@ function PosSettingsPage() {
 
                 <div style={{background:"white",borderRadius:12,border:"1px solid #E5E7EB",padding:"4px 20px"}}>
 
+                  <Row label="Dokunmatik Klavye"
+                    desc="Input alanlarına tıklayınca ekran klavyesi açılır">
+                    <Toggle
+                      on={settings.touchKeyboard}
+                      onChange={() => set("touchKeyboard", !settings.touchKeyboard)}
+                    />
+                  </Row>
+
+                  <Row label="İkinci Ekran (Müşteri Ekranı)"
+                    desc="Kasaya bağlı müşteri ekranını etkinleştirir">
+                    <Toggle
+                      on={settings.customerDisplay}
+                      onChange={() => set("customerDisplay", !settings.customerDisplay)}
+                    />
+                  </Row>
+
                   {tab==="gorunum"&&(<>
                     <Row label="Fiyat göster" desc="PLU tuşunda satış fiyatını gösterir">
                       <Toggle on={settings.showPrice} onChange={()=>set("showPrice",!settings.showPrice)} />
@@ -885,6 +981,19 @@ function PosSettingsPage() {
                           </button>
                         ))}
                       </div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                      padding: "16px 0", borderBottom: "1px solid #F5F5F5" }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>Bekleyen Belge Varken Çıkış</div>
+                        <div style={{ fontSize: 11, color: "#6B7280" }}>
+                          Kapalıysa bekleyen belge varken çıkış yapılamaz
+                        </div>
+                      </div>
+                      <Toggle
+                        on={settings.allowExitWithHeldDocs ?? true}
+                        onChange={() => set("allowExitWithHeldDocs", !settings.allowExitWithHeldDocs)}
+                      />
                     </div>
                     <div style={{padding:"16px 0",borderBottom:"1px solid #F5F5F5"}}>
                       <div style={{fontSize:14,fontWeight:500,color:"#212121",marginBottom:10}}>PLU Görüntüleme Modu</div>
@@ -1070,6 +1179,45 @@ function PosSettingsPage() {
                     </div>
                   )}
 
+                  <div style={{ padding: "16px 20px", background: "#FFFBEB",
+                    border: "1px solid #FDE68A", borderRadius: 12, marginTop: 16 }}>
+
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "#D97706", marginBottom: 16 }}>
+                      🖨️ Fiş Davranışı
+                    </div>
+
+                    {(
+                      [
+                        { key: "satis" as const, label: "🛒 Satış sonrası fiş" },
+                        { key: "tahsilat" as const, label: "💰 Cari tahsilat fişi" },
+                        { key: "odeme" as const, label: "💸 Cari ödeme fişi" },
+                      ] as const
+                    ).map(({ key, label }) => (
+                      <div key={key} style={{ display: "flex", alignItems: "center",
+                        justifyContent: "space-between", padding: "10px 0",
+                        borderBottom: "1px solid #FEF3C7" }}>
+                        <span style={{ fontSize: 13, color: "#374151" }}>{label}</span>
+                        <select
+                          value={settings.printBehavior[key] ?? "ask"}
+                          onChange={(e) =>
+                            setSettings((s) => ({
+                              ...s,
+                              printBehavior: {
+                                ...s.printBehavior,
+                                [key]: e.target.value as PrintBehaviorMode,
+                              },
+                            }))
+                          }
+                          style={{ fontSize: 12, padding: "5px 8px",
+                            borderRadius: 6, border: "1px solid #FDE68A" }}>
+                          <option value="ask">Kasiyer Seçsin</option>
+                          <option value="default">Varsayılanı Bas</option>
+                          <option value="none">Hiç Basma</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+
                   {tab==="giris" && selectedNode?.type !== "cashier" && (
                     <div style={{ padding: "16px 0" }}>
                       <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 20,
@@ -1237,6 +1385,21 @@ function PosSettingsPage() {
 
                 {selectedNode?.type === "terminal" && activeTab === "payment" && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                    <div style={{ padding: "16px 20px", background: "white", border: "1px solid #E5E7EB", borderRadius: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>Cari Tahsilatta Pavo Kullan</div>
+                          <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>
+                            Açıksa tahsilat Pavo üzerinden alınır — fiş ve e-belge oluşur
+                          </div>
+                        </div>
+                        <Toggle
+                          on={settings.cariPaymentUsePavo ?? false}
+                          onChange={() => set("cariPaymentUsePavo", !settings.cariPaymentUsePavo)}
+                        />
+                      </div>
+                    </div>
+
                     <div style={{ padding: "16px 20px", background: "#F8FAFF", border: "1px solid #C7D7FF", borderRadius: 12 }}>
                       <div style={{ fontSize: 13, fontWeight: 700, color: "#1D4ED8", marginBottom: 16 }}>
                         💳 Pavo Ödeme Cihazı
@@ -1306,6 +1469,15 @@ function PosSettingsPage() {
                         )}
                       </div>
                     </div>
+                  </div>
+                )}
+
+                {selectedNode?.type === "terminal" && activeTab === "payment" && result && (
+                  <div style={{ marginTop: 12, padding: "12px 16px", borderRadius: 8, fontSize: 13, fontWeight: 500,
+                    background: result.ok ? "#F0FDF4" : "#FEF2F2",
+                    border: `1px solid ${result.ok ? "#BBF7D0" : "#FECACA"}`,
+                    color: result.ok ? "#166534" : "#991B1B" }}>
+                    {result.text}
                   </div>
                 )}
 

@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { withAuth } from "@/components/withAuth";
 import { Badge } from "@/components/ui/badge";
-import { apiRequest } from "@/services/api";
+import { apiFetch, apiRequest } from "@/services/api";
 import { USER_KEY } from "@/context/AuthContext";
 
 // ─── Tipler ────────────────────────────────────────────────────────────────────
@@ -57,6 +57,22 @@ interface IsbasiProduct {
   isActive?: boolean;
 }
 
+interface IsbasiStatus {
+  connected: boolean;
+  status: "connected" | "disconnected" | "error";
+  email: string | null;
+  connected_at: string | null;
+  error: string | null;
+}
+
+const DISCONNECTED_STATUS: IsbasiStatus = {
+  connected: false,
+  status: "disconnected",
+  email: null,
+  connected_at: null,
+  error: null,
+};
+
 // ─── Sabitler ─────────────────────────────────────────────────────────────────
 const READ_LIMIT  = 3000;
 const WRITE_LIMIT = 7000;
@@ -88,6 +104,11 @@ function getCompanyId(): string | null {
   } catch {
     return null;
   }
+}
+
+function errorText(e: unknown, fallback: string): string {
+  if (e instanceof Error && e.message) return e.message;
+  return fallback;
 }
 
 // ─── Progress Bar renk yardımcıları ──────────────────────────────────────────
@@ -348,6 +369,12 @@ function ErpSettingsPage() {
   const [products, setProducts]           = useState<IsbasiProduct[]>([]);
   const [productError, setProductError]   = useState<string | null>(null);
   const [productTotal, setProductTotal]   = useState<number | null>(null);
+  const [isbasiStatus, setIsbasiStatus]   = useState<IsbasiStatus | null>(null);
+  const [isbasiLoading, setIsbasiLoading] = useState(false);
+  const [isbasiMsg, setIsbasiMsg]         = useState<{ ok: boolean; text: string } | null>(null);
+  const [isbasiUsername, setIsbasiUsername] = useState("");
+  const [isbasiPassword, setIsbasiPassword] = useState("");
+  const [isbasiLoginMode, setIsbasiLoginMode] = useState<"api" | "sso">("sso");
 
   const updateField = useCallback(
     <K extends keyof ErpFormState>(field: K) =>
@@ -381,7 +408,8 @@ function ErpSettingsPage() {
         }
 
         setForm({
-          erpType:     (raw.erp_type ?? raw.erpType ?? "logo-isbasi") as ErpType,
+          // Supabase'de erp_type alt çizgili tutulur (logo_isbasi), formda tireli kullanılır
+          erpType:     ((raw.erp_type ?? raw.erpType ?? "logo-isbasi").replace(/_/g, "-")) as ErpType,
           baseUrl:     raw.base_url  ?? raw.baseUrl  ?? "https://integration.isbasi.com",
           apiKey:      raw.api_key   ?? raw.apiKey   ?? "",
           username:    raw.username  ?? "",
@@ -408,6 +436,124 @@ function ErpSettingsPage() {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // ── İşbaşı SSO Bağlantısı ────────────────────────────────────────────────────
+  const loadIsbasiStatus = useCallback(async () => {
+    const companyId = getCompanyId();
+    if (!companyId) {
+      setIsbasiStatus(DISCONNECTED_STATUS);
+      return;
+    }
+    try {
+      const data = await apiFetch<IsbasiStatus>(`/isbasi/status/${companyId}`);
+      setIsbasiStatus(data ?? DISCONNECTED_STATUS);
+    } catch {
+      setIsbasiStatus(DISCONNECTED_STATUS);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadIsbasiStatus();
+  }, [loadIsbasiStatus]);
+
+  // Callback dönüşünde ?isbasi=success|error parametrelerini işleyip URL'yi temizle
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const isbasi = params.get("isbasi");
+    const msg    = params.get("msg");
+    if (!isbasi) return;
+
+    if (isbasi === "success") {
+      setIsbasiMsg({ ok: true, text: "İşbaşı hesabı başarıyla bağlandı!" });
+      void loadIsbasiStatus();
+    } else if (isbasi === "error") {
+      setIsbasiMsg({ ok: false, text: msg ? decodeURIComponent(msg) : "Bağlantı başarısız." });
+    }
+    window.history.replaceState({}, "", window.location.pathname);
+  }, [loadIsbasiStatus]);
+
+  // SSO dönüşünde integrationLogin bu bilgileri kullandığı için önce kaydedilmeli.
+  const saveIsbasiCredentials = async (companyId: string): Promise<boolean> => {
+    try {
+      const res = await apiFetch<{ success?: boolean; message?: string }>(
+        `/isbasi/credentials/${companyId}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            username: isbasiUsername.trim(),
+            password: isbasiPassword,
+          }),
+        }
+      );
+      console.log("[İşbaşı SSO] credentials yanıtı →", res);
+      if (res?.success === false) {
+        setIsbasiMsg({ ok: false, text: res.message ?? "Bilgiler kaydedilemedi." });
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.error("[İşbaşı SSO] credentials hatası →", e);
+      setIsbasiMsg({ ok: false, text: errorText(e, "Bilgiler kaydedilemedi.") });
+      return false;
+    }
+  };
+
+  const connectIsbasi = async () => {
+    const companyId = getCompanyId();
+    console.log("[İşbaşı SSO] companyId →", companyId);
+    if (!companyId) {
+      setIsbasiMsg({ ok: false, text: "Şirket bilgisi bulunamadı. Lütfen tekrar giriş yapın." });
+      return;
+    }
+    if (!isbasiUsername.trim() || !isbasiPassword) {
+      setIsbasiMsg({ ok: false, text: "Kullanıcı adı ve şifre gerekli." });
+      return;
+    }
+    setIsbasiLoading(true);
+    setIsbasiMsg(null);
+    try {
+      if (!(await saveIsbasiCredentials(companyId))) return;
+
+      const data = await apiFetch<{ url?: string; message?: string }>(`/isbasi/sso-url/${companyId}`);
+      console.log("[İşbaşı SSO] sso-url yanıtı →", data);
+      if (data?.url) {
+        window.location.href = data.url;
+        return;
+      }
+      setIsbasiMsg({ ok: false, text: data?.message ?? "SSO URL alınamadı." });
+    } catch (e) {
+      console.error("[İşbaşı SSO] sso-url hatası →", e);
+      setIsbasiMsg({ ok: false, text: errorText(e, "SSO URL alınamadı.") });
+    } finally {
+      setIsbasiLoading(false);
+    }
+  };
+
+  const disconnectIsbasi = async () => {
+    const companyId = getCompanyId();
+    if (!companyId) return;
+    if (!confirm("İşbaşı bağlantısını kesmek istediğinize emin misiniz?")) return;
+    setIsbasiLoading(true);
+    setIsbasiMsg(null);
+    try {
+      const res = await apiFetch<{ success?: boolean; message?: string }>(
+        `/isbasi/disconnect/${companyId}`,
+        { method: "DELETE" }
+      );
+      if (res?.success === false) {
+        setIsbasiMsg({ ok: false, text: res.message ?? "Bağlantı kesilemedi." });
+      } else {
+        setIsbasiMsg({ ok: true, text: "Bağlantı kesildi." });
+        setIsbasiUsername("");
+        setIsbasiPassword("");
+      }
+      await loadIsbasiStatus();
+    } catch (e) {
+      setIsbasiMsg({ ok: false, text: errorText(e, "Bağlantı kesilemedi.") });
+    } finally {
+      setIsbasiLoading(false);
+    }
+  };
 
   // ── JSON Doğrulama ───────────────────────────────────────────────────────────
   const validateJson = useCallback((raw: string): boolean => {
@@ -520,9 +666,22 @@ function ErpSettingsPage() {
     setProducts([]);
     setProductTotal(null);
 
+    // SSO modunda kimlik bilgisi yerine kayıtlı access_token kullanılır
+    const endpoint =
+      form.erpType === "logo-isbasi" && isbasiLoginMode === "sso"
+        ? `/integration/isbasi/products/${companyId}`
+        : `/integration/products/${companyId}`;
+
     try {
-      const res = await apiRequest<unknown>(`/integration/products/${companyId}`);
+      const res = await apiRequest<unknown>(endpoint);
       const raw = (res.data ?? res) as unknown as Record<string, unknown>;
+
+      const backendError = (raw?.error as string | undefined) ?? (res.message as string | undefined);
+      if (backendError) {
+        setProductStatus("error");
+        setProductError(backendError);
+        return;
+      }
 
       // İşbaşı yanıt formatı: { data: [...], totalCount: N }
       const list = (raw?.data as IsbasiProduct[] | undefined) ?? [];
@@ -540,7 +699,10 @@ function ErpSettingsPage() {
     }
   };
 
-  const companyId   = getCompanyId();
+  const companyId    = getCompanyId();
+  const isIsbasi     = form.erpType === "logo-isbasi";
+  const isSsoMode    = isIsbasi && isbasiLoginMode === "sso";
+  const showApiFields = !isSsoMode;
   const isFormValid =
     form.baseUrl.trim() !== "" &&
     form.apiKey.trim() !== "" &&
@@ -685,8 +847,41 @@ function ErpSettingsPage() {
               </div>
             </div>
           </div>
+
+          {/* Giriş modu — İşbaşı için SSO / API seçimi */}
+          {isIsbasi && (
+            <div className="mt-4">
+              <Label>Giriş Yöntemi</Label>
+              <div className="flex gap-1 p-1 bg-gray-100 rounded-lg">
+                {([
+                  { mode: "sso", label: "🔗 İşbaşı Hesabıyla Giriş" },
+                  { mode: "api", label: "🔑 API Bilgileri Gir" },
+                ] as const).map(({ mode, label }) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setIsbasiLoginMode(mode)}
+                    className={`flex-1 py-2 rounded-md text-sm transition-all ${
+                      isbasiLoginMode === mode
+                        ? "bg-white text-gray-900 font-semibold shadow-sm"
+                        : "text-gray-500 hover:text-gray-700"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <FieldHint>
+                {isbasiLoginMode === "sso"
+                  ? "İşbaşı hesabınızla oturum açarak bağlanın — API bilgisi girmeniz gerekmez."
+                  : "Base URL, API Key ve kimlik bilgilerini elle girin."}
+              </FieldHint>
+            </div>
+          )}
         </div>
 
+        {showApiFields && (
+        <>
         {/* Bölüm 2: Bağlantı Bilgileri */}
         <div className="px-6 py-5 space-y-5 border-b border-gray-100">
           <SectionDivider title="Bağlantı Bilgileri" />
@@ -879,7 +1074,131 @@ function ErpSettingsPage() {
             </button>
           </div>
         </div>
+        </>
+        )}
       </div>
+
+      {/* ── Logo İşbaşı SSO Bağlantısı ── */}
+      {isSsoMode && (
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-5">
+        <div className="flex items-center gap-3 mb-4">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="https://isbasi.com/images/logo_isbasi.svg"
+            alt="İşbaşı"
+            className="h-8 w-auto object-contain"
+          />
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">Logo İşbaşı Hesabı</h3>
+            <p className="text-xs text-gray-400">Tek oturum açma (SSO) ile hesap bağlantısı</p>
+          </div>
+          <span
+            className={`ml-auto text-xs font-semibold rounded-full px-2.5 py-0.5 ${
+              isbasiStatus?.connected
+                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                : "bg-gray-100 text-gray-500 border border-gray-200"
+            }`}
+          >
+            {isbasiStatus?.connected ? "● Bağlı" : "○ Bağlı Değil"}
+          </span>
+        </div>
+
+        {isbasiStatus?.connected && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 mb-3.5">
+            <p className="text-xs text-emerald-700">
+              Bağlı hesap: <strong>{isbasiStatus.email ?? "—"}</strong>
+            </p>
+            {isbasiStatus.connected_at && (
+              <p className="text-xs text-gray-500 mt-1">
+                Bağlantı tarihi: {new Date(isbasiStatus.connected_at).toLocaleString("tr-TR")}
+              </p>
+            )}
+          </div>
+        )}
+
+        {isbasiStatus?.status === "error" && (
+          <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 mb-3.5">
+            <p className="text-xs text-red-700">{isbasiStatus.error ?? "Bağlantı hatası"}</p>
+          </div>
+        )}
+
+        {isbasiMsg && (
+          <div
+            className={`rounded-lg px-4 py-3 mb-3 text-xs font-medium ${
+              isbasiMsg.ok
+                ? "bg-emerald-50 border border-emerald-200 text-emerald-700"
+                : "bg-red-50 border border-red-200 text-red-700"
+            }`}
+          >
+            {isbasiMsg.text}
+          </div>
+        )}
+
+        {!isbasiStatus?.connected && (
+          <div className="space-y-3 mb-3.5">
+            <div>
+              <Label htmlFor="isbasiUsername">İşbaşı E-posta</Label>
+              <InputField
+                id="isbasiUsername"
+                value={isbasiUsername}
+                onChange={setIsbasiUsername}
+                placeholder="ornek@firma.com"
+              />
+            </div>
+            <div>
+              <Label htmlFor="isbasiPassword">İşbaşı Şifre</Label>
+              <InputField
+                id="isbasiPassword"
+                value={isbasiPassword}
+                onChange={setIsbasiPassword}
+                placeholder="••••••••"
+                type="password"
+              />
+            </div>
+          </div>
+        )}
+
+        {!isbasiStatus?.connected ? (
+          <button
+            type="button"
+            onClick={connectIsbasi}
+            disabled={isbasiLoading || !companyId || !isbasiUsername.trim() || !isbasiPassword}
+            className="inline-flex items-center gap-3 px-5 py-3 rounded-xl bg-[#1B4DB1] text-white text-base font-semibold
+              hover:bg-[#163F94] active:bg-[#12357A] transition-all shadow-md
+              disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isbasiLoading ? (
+              <svg className="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            ) : (
+              <span className="h-9 px-3 rounded-lg bg-white flex items-center justify-center shrink-0">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="https://isbasi.com/images/logo_isbasi.svg" alt="" className="h-6 w-auto object-contain" />
+              </span>
+            )}
+            {isbasiLoading ? "Yönlendiriliyor..." : "Giriş Yap"}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={disconnectIsbasi}
+            disabled={isbasiLoading}
+            className="px-5 py-2.5 rounded-lg border border-red-200 bg-red-50 text-sm font-medium text-red-600
+              hover:bg-red-100 transition-all
+              disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isbasiLoading ? "İşleniyor..." : "Bağlantıyı Kes"}
+          </button>
+        )}
+
+        <p className="text-xs text-gray-400 mt-3">
+          İşbaşı hesap bilgilerinizi girin ve bağlan butonuna tıklayın.
+          İşbaşı giriş sayfasına yönlendirileceksiniz.
+        </p>
+      </div>
+      )}
 
       {/* ── Debug Paneli (geliştirme kolaylığı — alan eşleşmesini doğrula) ── */}
       <details className="group rounded-xl border border-dashed border-gray-300 overflow-hidden">
@@ -940,14 +1259,19 @@ function ErpSettingsPage() {
             <div>
               <h3 className="text-sm font-semibold text-gray-900">Malzeme Listesi Testi</h3>
               <p className="text-xs text-gray-400">
-                Kayıtlı kimlik bilgileriyle İşbaşı&apos;na login olur ve ürün listesini çeker.
+                {isSsoMode
+                  ? "Bağlı İşbaşı hesabının oturum token'ıyla ürün listesini çeker."
+                  : "Kayıtlı kimlik bilgileriyle İşbaşı'na login olur ve ürün listesini çeker."}
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={handleTestProducts}
-            disabled={!recordExists || productStatus === "fetching"}
+            disabled={
+              productStatus === "fetching" ||
+              (isSsoMode ? !isbasiStatus?.connected : !recordExists)
+            }
             className="flex items-center gap-2 px-4 py-2 rounded-lg border border-emerald-200 bg-emerald-50 text-sm font-medium text-emerald-700
               hover:bg-emerald-100 transition-all
               disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:border-gray-200 disabled:text-gray-400"
@@ -975,9 +1299,11 @@ function ErpSettingsPage() {
         {productStatus === "idle" && (
           <div className="px-6 py-8 text-center">
             <p className="text-sm text-gray-400">
-              {recordExists
-                ? "Yukarıdaki butona basarak İşbaşı'ndan ürün listesini çekebilirsiniz."
-                : "Bu testi kullanmak için önce ERP ayarlarını kaydedin."}
+              {isSsoMode && !isbasiStatus?.connected
+                ? "Bu testi kullanmak için önce İşbaşı hesabınızı bağlayın."
+                : !isSsoMode && !recordExists
+                  ? "Bu testi kullanmak için önce ERP ayarlarını kaydedin."
+                  : "Yukarıdaki butona basarak İşbaşı'ndan ürün listesini çekebilirsiniz."}
             </p>
           </div>
         )}

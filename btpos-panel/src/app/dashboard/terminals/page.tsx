@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { withAuth } from "@/components/withAuth";
 import {
   apiRequest,
+  apiFetch,
   sendCommand,
   getPosCommandHistory,
 } from "@/services/api";
@@ -17,6 +19,7 @@ const CMD_LABELS: Record<string, string> = {
   sync_cashiers:  "Kasiyer Güncelleme",
   sync_customers: "Cari Güncelleme",
   sync_settings:  "Ayar Güncelleme",
+  sync_templates: "Şablon Senkronizasyonu",
   logout:         "Kasiyer Çıkışı",
   message:        "Mesaj",
   restart:        "Yeniden Başlat",
@@ -31,6 +34,7 @@ const COMMANDS = [
   { key: "sync_cashiers",  label: "Kasiyerleri Güncelle",    needsPayload: false },
   { key: "sync_customers", label: "Carileri Güncelle",       needsPayload: false },
   { key: "sync_settings",  label: "Ayarları Güncelle",       needsPayload: false },
+  { key: "sync_templates", label: "Şablonları Güncelle",     needsPayload: false },
   { key: "message",        label: "Mesaj Gönder",            needsPayload: true  },
   { key: "logout",         label: "Kasiyeri Çıkart",         needsPayload: false },
   { key: "lock",           label: "Kasayı Kilitle",          needsPayload: true  },
@@ -53,8 +57,11 @@ interface Terminal {
   device_uid?: string;
   last_seen_at?: string;
   workplace_id?: string;
+  terminal_number?: string;
   workplaces?: { id: string; name: string } | null;
 }
+
+type EditableTerminal = Pick<Terminal, "id" | "terminal_name" | "workplace_id" | "terminal_number">;
 
 interface Workplace {
   id: string;
@@ -62,6 +69,22 @@ interface Workplace {
 }
 
 type TargetType = "terminal" | "workplace" | "company";
+
+interface TemplateListItem {
+  id: string;
+  name: string;
+  trigger_type: string;
+}
+
+const TEMPLATE_TRIGGER_LABELS: Record<string, string> = {
+  satis: "Satış",
+  tahsilat: "Tahsilat",
+  odeme: "Ödeme",
+  iade: "İade",
+  gunsonu: "Gün Sonu",
+  etiket: "Etiket",
+  manuel: "Manuel",
+};
 
 const COPY_GROUPS = [
   { key: "pos_settings", label: "POS Ayarları", icon: "⚙" },
@@ -119,6 +142,7 @@ function parseTerminalsPayload(data: unknown): Terminal[] {
       device_uid:    r.device_uid != null ? String(r.device_uid) : undefined,
       last_seen_at:  r.last_seen_at != null ? String(r.last_seen_at) : undefined,
       workplace_id:  r.workplace_id != null ? String(r.workplace_id) : undefined,
+      terminal_number: r.terminal_number != null ? String(r.terminal_number) : undefined,
       workplaces:
         wp != null && typeof wp === "object"
           ? {
@@ -228,6 +252,22 @@ function TerminalsPage() {
     detail?: string;
   } | null>(null);
 
+  const [templates, setTemplates] = useState<TemplateListItem[]>([]);
+
+  const [showEdit, setShowEdit]       = useState(false);
+  const [terminal, setTerminal]       = useState<EditableTerminal | null>(null);
+  const [savingEdit, setSavingEdit]   = useState(false);
+
+  const loadTemplates = useCallback(async () => {
+    if (!companyId) return;
+    try {
+      const data = await apiFetch<TemplateListItem[]>("/templates/{company_id}");
+      setTemplates(Array.isArray(data) ? data : []);
+    } catch {
+      setTemplates([]);
+    }
+  }, [companyId]);
+
   const loadTerminals = useCallback(async () => {
     if (!companyId) {
       setLoading(false);
@@ -336,7 +376,57 @@ function TerminalsPage() {
 
   useEffect(() => {
     void loadTerminals();
-  }, [loadTerminals]);
+    void loadTemplates();
+  }, [loadTerminals, loadTemplates]);
+
+  const openSendCmdModal = (t: Terminal) => {
+    setSelectedTerm(t);
+    setSelCmd(COMMANDS[0].key);
+    setShowSendCmd(true);
+    void loadTemplates();
+  };
+
+  const openEditModal = (t: Terminal) => {
+    setTerminal({
+      id:              t.id,
+      terminal_name:   t.terminal_name,
+      workplace_id:    t.workplace_id,
+      terminal_number: t.terminal_number,
+    });
+    setShowEdit(true);
+  };
+
+  const closeEditModal = () => {
+    setShowEdit(false);
+    setTerminal(null);
+  };
+
+  function updTerminal<K extends keyof EditableTerminal>(key: K, value: EditableTerminal[K]) {
+    setTerminal((prev) => (prev ? { ...prev, [key]: value } : prev));
+  }
+
+  async function saveTerminal() {
+    if (!terminal) return;
+    setSavingEdit(true);
+    try {
+      await apiRequest(`/terminals/${terminal.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          terminal_name:   terminal.terminal_name,
+          workplace_id:    terminal.workplace_id ?? null,
+          terminal_number: terminal.terminal_number?.trim() || null,
+        }),
+      });
+      setToast({ ok: true, text: "Kasa bilgileri güncellendi." });
+      closeEditModal();
+      void loadTerminals();
+    } catch {
+      setToast({ ok: false, text: "Güncelleme başarısız." });
+    } finally {
+      setSavingEdit(false);
+      setTimeout(() => setToast(null), 3500);
+    }
+  }
 
   const openAllHistory = () => {
     setSelectedTerm(null);
@@ -360,8 +450,31 @@ function TerminalsPage() {
 
   const sendCommandToTerminal = async () => {
     if (!selectedTerm || !companyId) return;
+    if (selCmd === "sync_templates" && templates.length === 0) {
+      setToast({ ok: false, text: "Gönderilecek şablon yok." });
+      setTimeout(() => setToast(null), 3500);
+      return;
+    }
     setSending(true);
     try {
+      if (selCmd === "sync_templates") {
+        await apiFetch("/templates/{company_id}/send-to-terminals", {
+          method: "POST",
+          body: JSON.stringify({
+            send_to_all: false,
+            terminal_ids: [selectedTerm.id],
+            template_ids: templates.map((t) => t.id),
+          }),
+        });
+        setToast({
+          ok: true,
+          text: `${templates.length} şablon kasaya gönderildi.`,
+        });
+        setShowSendCmd(false);
+        void loadTerminals();
+        return;
+      }
+
       const payload: Record<string, unknown> = {};
       if (selCmd === "message") {
         payload.text = msgText.trim();
@@ -415,6 +528,91 @@ function TerminalsPage() {
             }`}
         >
           {toast.text}
+        </div>
+      )}
+
+      {/* Kasa düzenle modal */}
+      {showEdit && terminal && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="edit-term-title"
+        >
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+              <h2 id="edit-term-title" className="text-base font-semibold text-gray-900">
+                Kasa Düzenle
+              </h2>
+              <button
+                type="button"
+                onClick={closeEditModal}
+                className="p-1 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                aria-label="Kapat"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div>
+                <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>Kasa Adı</div>
+                <input
+                  value={terminal.terminal_name}
+                  onChange={(e) => updTerminal("terminal_name", e.target.value)}
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800
+                    focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>Şube</div>
+                <select
+                  value={terminal.workplace_id ?? ""}
+                  onChange={(e) => updTerminal("workplace_id", e.target.value || undefined)}
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800 bg-white
+                    focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Şube seçilmedi</option>
+                  {workplaces.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>Kasa Numarası</div>
+                <input
+                  value={terminal.terminal_number ?? ""}
+                  onChange={(e) => updTerminal("terminal_number", e.target.value)}
+                  placeholder="Örn: 01, K1"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800
+                    focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-5 py-4 border-t border-gray-100 bg-gray-50">
+              <button
+                type="button"
+                onClick={closeEditModal}
+                className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+              >
+                İptal
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveTerminal()}
+                disabled={savingEdit || !terminal.terminal_name.trim()}
+                className="px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-500
+                  disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {savingEdit ? "Kaydediliyor…" : "Kaydet"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -529,6 +727,41 @@ function TerminalsPage() {
                   />
                 </div>
               )}
+              {selCmd === "sync_templates" && (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-500">
+                    Tüm şablonlar seçili kasaya senkronize edilir ve kasada SQLite&apos;a
+                    kaydedilir.
+                  </p>
+                  {templates.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-gray-200 px-3 py-4 text-center text-xs text-gray-400">
+                      Henüz şablon yok.{" "}
+                      <Link href="/dashboard/templates" className="text-[#1565C0] font-medium">
+                        Şablon oluştur →
+                      </Link>
+                    </div>
+                  ) : (
+                    <ul className="max-h-40 overflow-y-auto rounded-lg border border-gray-200 divide-y divide-gray-100">
+                      {templates.map((tmpl) => (
+                        <li
+                          key={tmpl.id}
+                          className="flex items-center justify-between gap-2 px-3 py-2 text-xs bg-gray-50"
+                        >
+                          <span className="font-medium text-gray-800 truncate">
+                            {tmpl.name}
+                          </span>
+                          <span className="shrink-0 text-[10px] text-gray-500 bg-white border border-gray-200 rounded px-1.5 py-0.5">
+                            {TEMPLATE_TRIGGER_LABELS[tmpl.trigger_type] ?? tmpl.trigger_type}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="text-[11px] text-gray-400">
+                    {templates.length} şablon gönderilecek
+                  </p>
+                </div>
+              )}
             </div>
             <div className="flex justify-end gap-2 px-5 py-4 border-t border-gray-100 bg-gray-50 shrink-0">
               <button
@@ -541,7 +774,11 @@ function TerminalsPage() {
               <button
                 type="button"
                 onClick={sendCommandToTerminal}
-                disabled={sending || (selCmd === "message" && !msgText.trim())}
+                disabled={
+                  sending ||
+                  (selCmd === "message" && !msgText.trim()) ||
+                  (selCmd === "sync_templates" && templates.length === 0)
+                }
                 className="px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-500
                   disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -882,6 +1119,9 @@ function TerminalsPage() {
                     {t.workplaces?.name && (
                       <span className="mr-2">📍 {t.workplaces.name}</span>
                     )}
+                    {t.terminal_number && (
+                      <span className="mr-2 font-mono">#{t.terminal_number}</span>
+                    )}
                     {t.device_name ?? "Cihaz adı yok"}
                     {t.device_uid && (
                       <span className="font-mono ml-2">{t.device_uid.slice(0, 12)}…</span>
@@ -895,6 +1135,13 @@ function TerminalsPage() {
                 </div>
               </div>
               <div className="flex flex-wrap gap-2 shrink-0 sm:ml-auto justify-end">
+                <button
+                  type="button"
+                  onClick={() => openEditModal(t)}
+                  className="px-3 py-2 text-xs font-semibold rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+                >
+                  Düzenle
+                </button>
                 <button
                   type="button"
                   onClick={() => openTerminalHistory(t)}
@@ -913,11 +1160,7 @@ function TerminalsPage() {
                 )}
                 <button
                   type="button"
-                  onClick={() => {
-                    setSelectedTerm(t);
-                    setSelCmd(COMMANDS[0].key);
-                    setShowSendCmd(true);
-                  }}
+                  onClick={() => openSendCmdModal(t)}
                   disabled={!t.is_installed}
                   className="px-3 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-500
                     disabled:opacity-40 disabled:cursor-not-allowed"
