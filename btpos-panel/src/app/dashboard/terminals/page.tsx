@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
@@ -12,33 +12,35 @@ import {
 import { USER_KEY } from "@/context/AuthContext";
 
 const CMD_LABELS: Record<string, string> = {
-  sync_all:       "Tüm Güncelleme",
-  sync_products:  "Ürün Güncelleme",
-  sync_prices:    "Fiyat Güncelleme",
-  sync_plu:       "PLU Güncelleme",
-  sync_cashiers:  "Kasiyer Güncelleme",
-  sync_customers: "Cari Güncelleme",
-  sync_settings:  "Ayar Güncelleme",
-  sync_templates: "Şablon Senkronizasyonu",
-  logout:         "Kasiyer Çıkışı",
-  message:        "Mesaj",
-  restart:        "Yeniden Başlat",
-  lock:           "Kilitle",
+  sync_all:             "Tüm Güncelleme",
+  sync_products:        "Ürün Güncelleme",
+  sync_prices:          "Fiyat Güncelleme",
+  sync_plu:             "PLU Güncelleme",
+  sync_cashiers:        "Kasiyer Güncelleme",
+  sync_customers:       "Cari Güncelleme",
+  sync_settings:        "Ayar Güncelleme",
+  sync_templates:       "Şablon Senkronizasyonu",
+  sync_payment_brands:  "Ödeme Yöntemleri",
+  logout:               "Kasiyer Çıkışı",
+  message:              "Mesaj",
+  restart:              "Yeniden Başlat",
+  lock:                 "Kilitle",
 };
 
 const COMMANDS = [
-  { key: "sync_all",       label: "Tüm Verileri Güncelle",   needsPayload: false },
-  { key: "sync_products",  label: "Ürünleri Güncelle",       needsPayload: false },
-  { key: "sync_prices",    label: "Fiyatları Güncelle",      needsPayload: false },
-  { key: "sync_plu",       label: "PLU Gruplarını Güncelle", needsPayload: false },
-  { key: "sync_cashiers",  label: "Kasiyerleri Güncelle",    needsPayload: false },
-  { key: "sync_customers", label: "Carileri Güncelle",       needsPayload: false },
-  { key: "sync_settings",  label: "Ayarları Güncelle",       needsPayload: false },
-  { key: "sync_templates", label: "Şablonları Güncelle",     needsPayload: false },
-  { key: "message",        label: "Mesaj Gönder",            needsPayload: true  },
-  { key: "logout",         label: "Kasiyeri Çıkart",         needsPayload: false },
-  { key: "lock",           label: "Kasayı Kilitle",          needsPayload: true  },
-  { key: "restart",        label: "Yeniden Başlat",          needsPayload: false },
+  { key: "sync_all",             label: "Tüm Verileri Güncelle",      needsPayload: false },
+  { key: "sync_products",        label: "Ürünleri Güncelle",          needsPayload: false },
+  { key: "sync_prices",          label: "Fiyatları Güncelle",         needsPayload: false },
+  { key: "sync_plu",             label: "PLU Gruplarını Güncelle",    needsPayload: false },
+  { key: "sync_cashiers",        label: "Kasiyerleri Güncelle",       needsPayload: false },
+  { key: "sync_customers",       label: "Carileri Güncelle",          needsPayload: false },
+  { key: "sync_settings",        label: "Ayarları Güncelle",          needsPayload: false },
+  { key: "sync_templates",       label: "Şablonları Güncelle",        needsPayload: false },
+  { key: "sync_payment_brands",  label: "Ödeme Yöntemlerini Gönder",  needsPayload: false },
+  { key: "message",              label: "Mesaj Gönder",               needsPayload: true  },
+  { key: "logout",               label: "Kasiyeri Çıkart",            needsPayload: false },
+  { key: "lock",                 label: "Kasayı Kilitle",             needsPayload: true  },
+  { key: "restart",              label: "Yeniden Başlat",             needsPayload: false },
 ] as const;
 
 /** Tam / fark güncelleme modu bu komutların payload'ına `mode` olarak eklenir. */

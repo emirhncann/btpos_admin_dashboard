@@ -9,7 +9,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
 // ─── Tipler ──────────────────────────────────────────────────────────────────
 type NodeType = "terminal" | "cashier";
-type Tab = "gorunum" | "satis" | "iskonto" | "plu_grid" | "giris";
+type Tab = "gorunum" | "satis" | "iskonto" | "plu_grid" | "giris" | "odeme_hesaplari";
 type DuplicateItemAction = "increase_qty" | "add_new";
 type PluMode = "terminal" | "cashier";
 type PavoPrintWidth = "58mm" | "80mm";
@@ -21,6 +21,13 @@ interface TreeNode { type: NodeType; id: string; label: string; workplaceId?: st
 interface Workplace { id: string; name: string }
 interface Terminal  { id: string; terminal_name: string; workplace_id?: string; is_installed: boolean }
 interface Cashier   { id: string; full_name: string; cashier_code: string }
+
+interface PaymentProviderBrand {
+  payment_provider_brand_id: number;
+  payment_provider_brand_nm: string;
+  payment_mediator: number;
+  comment_dsc: string | null;
+}
 
 interface Settings {
   showPrice: boolean; showCode: boolean; showBarcode: boolean;
@@ -137,11 +144,12 @@ const DEFAULT: Settings = {
 };
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
-  { key: "gorunum",  label: "Görünüm",     icon: "👁" },
-  { key: "satis",    label: "Satış",        icon: "🛒" },
-  { key: "iskonto",  label: "İskonto",      icon: "%" },
-  { key: "plu_grid", label: "PLU Izgarası", icon: "▦" },
-  { key: "giris",    label: "Giriş Yöntemi", icon: "🔐" },
+  { key: "gorunum",         label: "Görünüm",         icon: "👁" },
+  { key: "satis",           label: "Satış",            icon: "🛒" },
+  { key: "iskonto",         label: "İskonto",          icon: "%" },
+  { key: "plu_grid",        label: "PLU Izgarası",     icon: "▦" },
+  { key: "giris",           label: "Giriş Yöntemi",    icon: "🔐" },
+  { key: "odeme_hesaplari", label: "Ödeme Hesapları",  icon: "💳" },
 ];
 
 const PREV_PRODS = [
@@ -256,6 +264,11 @@ function PosSettingsPage() {
   const [pavoPairResult, setPavoPairResult] = useState<{ ok: boolean; message?: string } | null>(null);
   const [savingPayment, setSavingPayment] = useState(false);
 
+  const [allBrands,       setAllBrands]       = useState<PaymentProviderBrand[]>([]);
+  const [terminalBrands,  setTerminalBrands]  = useState<Record<string, number[]>>({});
+  const [savingBrandsFor, setSavingBrandsFor] = useState<string | null>(null);
+  const [brandSavedFor,   setBrandSavedFor]   = useState<string | null>(null);
+
   async function loadPavoSettings(terminalId: string) {
     if (!companyId) return;
     try {
@@ -363,6 +376,43 @@ function PosSettingsPage() {
 
   useEffect(() => { void loadAll(); }, [loadAll]);
 
+  useEffect(() => {
+    void apiFetch<PaymentProviderBrand[]>("/payment-provider-brands")
+      .then((data) => setAllBrands(Array.isArray(data) ? data : []))
+      .catch(() => setAllBrands([]));
+  }, []);
+
+  async function loadTerminalBrands(terminalId: string) {
+    try {
+      const data = await apiFetch<PaymentProviderBrand[]>(
+        `/payment-provider-brands/enabled/${terminalId}`
+      );
+      const list = Array.isArray(data) ? data : [];
+      setTerminalBrands((prev) => ({
+        ...prev,
+        [terminalId]: list.map((b) => b.payment_provider_brand_id),
+      }));
+    } catch {
+      setTerminalBrands((prev) => ({ ...prev, [terminalId]: [] }));
+    }
+  }
+
+  async function saveTerminalBrands(terminalId: string) {
+    setSavingBrandsFor(terminalId);
+    try {
+      await apiFetch(`/payment-provider-brands/enabled/${terminalId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          enabled_payment_brands: terminalBrands[terminalId] ?? [],
+        }),
+      });
+      setBrandSavedFor(terminalId);
+      setTimeout(() => setBrandSavedFor(null), 2000);
+    } finally {
+      setSavingBrandsFor(null);
+    }
+  }
+
   // Ayar yükleme
   const loadSettings = useCallback(async (node: TreeNode) => {
     if (!companyId) return;
@@ -453,6 +503,19 @@ function PosSettingsPage() {
   useEffect(() => {
     setPavoPairResult(null);
   }, [activeTab]);
+
+  useEffect(() => {
+    if (tab !== "odeme_hesaplari") return;
+    if (!selectedNode || selectedNode.type !== "terminal") return;
+    void loadTerminalBrands(selectedNode.id);
+  }, [tab, selectedNode]);
+
+  // Kasiyer seçilince yalnızca kasaya özel sekmeleri kapat
+  useEffect(() => {
+    if (selectedNode?.type === "cashier" && (tab === "giris" || tab === "odeme_hesaplari")) {
+      setTab("gorunum");
+    }
+  }, [selectedNode, tab]);
 
   // Kaydet
   async function save() {
@@ -923,6 +986,7 @@ function PosSettingsPage() {
                   {/* Kasiyer seciliyken "Giris Yontemi" sekmesi gizlenir */}
                   {TABS
                     .filter(t => !(t.key === "giris" && selectedNode?.type === "cashier"))
+                    .filter(t => !(t.key === "odeme_hesaplari" && selectedNode?.type !== "terminal"))
                     .map(t=>(
                     <button key={t.key} type="button" onClick={()=>setTab(t.key)}
                       style={{flex:1,padding:"9px 8px",borderRadius:7,cursor:"pointer",fontSize:13,
@@ -936,6 +1000,8 @@ function PosSettingsPage() {
 
                 <div style={{background:"white",borderRadius:12,border:"1px solid #E5E7EB",padding:"4px 20px"}}>
 
+                  {tab !== "odeme_hesaplari" && (
+                    <>
                   <Row label="Dokunmatik Klavye"
                     desc="Input alanlarına tıklayınca ekran klavyesi açılır">
                     <Toggle
@@ -951,6 +1017,8 @@ function PosSettingsPage() {
                       onChange={() => set("customerDisplay", !settings.customerDisplay)}
                     />
                   </Row>
+                    </>
+                  )}
 
                   {tab==="gorunum"&&(<>
                     <Row label="Fiyat göster" desc="PLU tuşunda satış fiyatını gösterir">
@@ -1299,11 +1367,111 @@ function PosSettingsPage() {
                       </div>
                     </div>
                   )}
+
+                  {tab === "odeme_hesaplari" && selectedNode?.type === "terminal" && (() => {
+                    const terminalId = selectedNode.id;
+                    const enabled = terminalBrands[terminalId] ?? [];
+                    return (
+                      <div style={{ padding: "16px 0" }}>
+                        <div style={{
+                          fontSize: 13, color: "#6B7280", marginBottom: 16,
+                          padding: "10px 14px", borderRadius: 8, background: "#F9FAFB",
+                          border: "1px solid #E5E7EB",
+                        }}>
+                          Bu kasada kullanılabilecek yemek kartı ve online ödeme yöntemlerini seçin.
+                        </div>
+
+                        {allBrands.length === 0 && (
+                          <div style={{ textAlign: "center", padding: "28px 0", fontSize: 13, color: "#9CA3AF" }}>
+                            Ödeme markası bulunamadı
+                          </div>
+                        )}
+
+                        {[
+                          { label: "🍽️ Yemek Kartları", mediator: 10 },
+                          { label: "🌐 Online Ödemeler", mediator: 14 },
+                        ].map((group) => {
+                          const groupBrands = allBrands.filter((b) => b.payment_mediator === group.mediator);
+                          if (groupBrands.length === 0) return null;
+                          return (
+                            <div key={group.mediator} style={{ marginBottom: 16 }}>
+                              <div style={{
+                                fontSize: 11, fontWeight: 700, color: "#374151",
+                                marginBottom: 8, padding: "4px 0", borderBottom: "1px solid #F3F4F6",
+                              }}>
+                                {group.label}
+                              </div>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                {groupBrands.map((brand) => {
+                                  const isEnabled = enabled.includes(brand.payment_provider_brand_id);
+                                  return (
+                                    <div
+                                      key={brand.payment_provider_brand_id}
+                                      onClick={() => setTerminalBrands((prev) => {
+                                        const cur = prev[terminalId] ?? [];
+                                        const next = isEnabled
+                                          ? cur.filter((id) => id !== brand.payment_provider_brand_id)
+                                          : [...cur, brand.payment_provider_brand_id];
+                                        return { ...prev, [terminalId]: next };
+                                      })}
+                                      style={{
+                                        display: "flex", alignItems: "center", gap: 10,
+                                        padding: "9px 12px", borderRadius: 8, cursor: "pointer",
+                                        border: `1px solid ${isEnabled ? "#BFDBFE" : "#E5E7EB"}`,
+                                        background: isEnabled ? "#EFF6FF" : "white",
+                                      }}
+                                    >
+                                      <div style={{
+                                        width: 18, height: 18, borderRadius: 4, flexShrink: 0,
+                                        border: `2px solid ${isEnabled ? "#1565C0" : "#D1D5DB"}`,
+                                        background: isEnabled ? "#1565C0" : "white",
+                                        display: "flex", alignItems: "center", justifyContent: "center",
+                                      }}>
+                                        {isEnabled && <span style={{ color: "white", fontSize: 11 }}>✓</span>}
+                                      </div>
+                                      <div style={{ flex: 1 }}>
+                                        <div style={{ fontSize: 13, fontWeight: 500, color: "#111827" }}>
+                                          {brand.payment_provider_brand_nm}
+                                        </div>
+                                        {brand.comment_dsc && (
+                                          <div style={{ fontSize: 10, color: "#9CA3AF", marginTop: 1 }}>
+                                            {brand.comment_dsc}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        <button
+                          type="button"
+                          onClick={() => void saveTerminalBrands(terminalId)}
+                          disabled={!!savingBrandsFor}
+                          style={{
+                            width: "100%", marginTop: 8, padding: "12px", borderRadius: 9, border: "none",
+                            background: brandSavedFor === terminalId ? "#2E7D32" : "#111827",
+                            color: "white", fontWeight: 700, fontSize: 13, cursor: "pointer",
+                            opacity: savingBrandsFor ? 0.7 : 1,
+                          }}
+                        >
+                          {brandSavedFor === terminalId
+                            ? "✓ Kaydedildi"
+                            : savingBrandsFor
+                              ? "Kaydediliyor..."
+                              : "Kaydet"}
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
                   </>
                 )}
 
-                {selectedNode?.type === "terminal" && (selectedNode?.type !== "terminal" || activeTab === "general") && (
+                {selectedNode?.type === "terminal" && activeTab === "general" && tab !== "odeme_hesaplari" && (
                   <div style={{ marginTop: 24 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 8 }}>
                       Torba Cari
@@ -1481,7 +1649,7 @@ function PosSettingsPage() {
                   </div>
                 )}
 
-                {(selectedNode?.type !== "terminal" || activeTab === "general") && result&&(
+                {(selectedNode?.type !== "terminal" || (activeTab === "general" && tab !== "odeme_hesaplari")) && result&&(
                   <div style={{marginTop:12,padding:"12px 16px",borderRadius:8,fontSize:13,fontWeight:500,
                     background:result.ok?"#F0FDF4":"#FEF2F2",
                     border:`1px solid ${result.ok?"#BBF7D0":"#FECACA"}`,
@@ -1490,7 +1658,7 @@ function PosSettingsPage() {
                   </div>
                 )}
 
-                {(selectedNode?.type !== "terminal" || activeTab === "general") && (
+                {(selectedNode?.type !== "terminal" || (activeTab === "general" && tab !== "odeme_hesaplari")) && (
                   <button type="button" onClick={()=>void save()} disabled={saving}
                     style={{marginTop:16,width:"100%",padding:"14px",borderRadius:10,
                       background:saving?"#E0E0E0":"#1565C0",color:saving?"#9E9E9E":"white",

@@ -1086,7 +1086,7 @@ function ErpSettingsPage() {
           <img
             src="https://isbasi.com/images/logo_isbasi.svg"
             alt="İşbaşı"
-            className="h-8 w-auto object-contain"
+            className="h-8 w-auto max-w-[140px] object-contain shrink-0"
           />
           <div>
             <h3 className="text-sm font-semibold text-gray-900">Logo İşbaşı Hesabı</h3>
@@ -1163,20 +1163,22 @@ function ErpSettingsPage() {
             type="button"
             onClick={connectIsbasi}
             disabled={isbasiLoading || !companyId || !isbasiUsername.trim() || !isbasiPassword}
-            className="inline-flex items-center gap-3 px-5 py-3 rounded-xl bg-[#1B4DB1] text-white text-base font-semibold
-              hover:bg-[#163F94] active:bg-[#12357A] transition-all shadow-md
+            className="inline-flex items-center gap-3 px-5 py-3 rounded-xl bg-white border border-gray-200 text-gray-900 text-base font-semibold
+              hover:bg-gray-50 active:bg-gray-100 transition-all shadow-sm
               disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isbasiLoading ? (
-              <svg className="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+              <svg className="w-6 h-6 animate-spin text-[#1B4DB1]" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
             ) : (
-              <span className="h-9 px-3 rounded-lg bg-white flex items-center justify-center shrink-0">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="https://isbasi.com/images/logo_isbasi.svg" alt="" className="h-6 w-auto object-contain" />
-              </span>
+              /* eslint-disable-next-line @next/next/no-img-element */
+              <img
+                src="https://isbasi.com/images/logo_isbasi.svg"
+                alt=""
+                className="h-7 w-auto max-w-[130px] object-contain shrink-0"
+              />
             )}
             {isbasiLoading ? "Yönlendiriliyor..." : "Giriş Yap"}
           </button>
