@@ -9,7 +9,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
 // ─── Tipler ──────────────────────────────────────────────────────────────────
 type NodeType = "terminal" | "cashier";
-type Tab = "gorunum" | "satis" | "iskonto" | "plu_grid" | "giris" | "odeme_hesaplari";
+type Tab = "gorunum" | "satis" | "iskonto" | "plu_grid" | "giris" | "odeme_hesaplari" | "barkod";
 type DuplicateItemAction = "increase_qty" | "add_new";
 type PluMode = "terminal" | "cashier";
 type PavoPrintWidth = "58mm" | "80mm";
@@ -27,6 +27,45 @@ interface PaymentProviderBrand {
   payment_provider_brand_nm: string;
   payment_mediator: number;
   comment_dsc: string | null;
+}
+
+interface BarcodeFormat {
+  id: string;
+  company_id: string;
+  terminal_id: string;
+  flag_code: number;
+  type: "weighted" | "counted";
+  integer_length: number;
+  decimal_length: number;
+  decimal_multiplier: number;
+  minimum_value: number;
+  is_active: boolean;
+  label: string | null;
+}
+
+interface BarcodeFormState {
+  flag_code: string;
+  type: "weighted" | "counted";
+  integer_length: string;
+  decimal_length: string;
+  label: string;
+  is_active: boolean;
+}
+
+const DEFAULT_BARCODE_FORM: BarcodeFormState = {
+  flag_code: "20",
+  type: "weighted",
+  integer_length: "2",
+  decimal_length: "3",
+  label: "",
+  is_active: true,
+};
+
+/** Gram hanesini 3 basamağa tamamlamak için 10^(3 - gramHane). 2 hane → ×10, 1 hane → ×100, 3 hane → ×1 */
+function gramPadMultiplier(decimalLength: number): number {
+  const pad = 3 - decimalLength;
+  if (pad <= 0) return 1;
+  return 10 ** pad;
 }
 
 interface Settings {
@@ -150,6 +189,7 @@ const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: "plu_grid",        label: "PLU Izgarası",     icon: "▦" },
   { key: "giris",           label: "Giriş Yöntemi",    icon: "🔐" },
   { key: "odeme_hesaplari", label: "Ödeme Hesapları",  icon: "💳" },
+  { key: "barkod",          label: "Barkod",           icon: "🔢" },
 ];
 
 const PREV_PRODS = [
@@ -268,6 +308,13 @@ function PosSettingsPage() {
   const [terminalBrands,  setTerminalBrands]  = useState<Record<string, number[]>>({});
   const [savingBrandsFor, setSavingBrandsFor] = useState<string | null>(null);
   const [brandSavedFor,   setBrandSavedFor]   = useState<string | null>(null);
+
+  const [barcodeFormats,   setBarcodeFormats]   = useState<BarcodeFormat[]>([]);
+  const [showBarcodeModal, setShowBarcodeModal] = useState(false);
+  const [editingFormat,    setEditingFormat]    = useState<BarcodeFormat | null>(null);
+  const [barcodeForm,      setBarcodeForm]      = useState<BarcodeFormState>(DEFAULT_BARCODE_FORM);
+  const [barcodeSaving,    setBarcodeSaving]    = useState(false);
+  const [barcodeError,     setBarcodeError]     = useState<string | null>(null);
 
   async function loadPavoSettings(terminalId: string) {
     if (!companyId) return;
@@ -413,6 +460,110 @@ function PosSettingsPage() {
     }
   }
 
+  const loadBarcodeFormats = useCallback(async (terminalId: string) => {
+    try {
+      const data = await apiFetch<BarcodeFormat[] | { error?: string }>(
+        `/barcode-formats/${terminalId}`
+      );
+      setBarcodeFormats(Array.isArray(data) ? data : []);
+    } catch {
+      setBarcodeFormats([]);
+    }
+  }, []);
+
+  async function saveBarcodeFormat() {
+    if (!selectedNode || selectedNode.type !== "terminal") return;
+    setBarcodeError(null);
+
+    const fc = parseInt(barcodeForm.flag_code, 10);
+    if (Number.isNaN(fc) || fc < 20 || fc > 29) {
+      setBarcodeError("Bayrak kodu 20-29 arasında olmalıdır.");
+      return;
+    }
+
+    const counted = barcodeForm.type === "counted";
+    const il = counted ? 5 : parseInt(barcodeForm.integer_length, 10);
+    const dl = counted ? 0 : parseInt(barcodeForm.decimal_length, 10);
+    if (Number.isNaN(il) || Number.isNaN(dl) || il + dl !== 5) {
+      setBarcodeError("Tam kısım + ondalık kısım toplamı 5 olmalıdır.");
+      return;
+    }
+
+    const multiplier = counted ? 1 : gramPadMultiplier(dl);
+
+    setBarcodeSaving(true);
+    try {
+      const payload = {
+        company_id: companyId,
+        terminal_id: selectedNode.id,
+        flag_code: fc,
+        type: barcodeForm.type,
+        integer_length: il,
+        decimal_length: dl,
+        decimal_multiplier: multiplier,
+        minimum_value: 1,
+        label: barcodeForm.label.trim() || null,
+        is_active: barcodeForm.is_active,
+      };
+
+      const res = editingFormat
+        ? await apiFetch<{ error?: string }>(`/barcode-formats/${editingFormat.id}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          })
+        : await apiFetch<{ error?: string }>("/barcode-formats", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+
+      if (res && typeof res === "object" && "error" in res && res.error) {
+        setBarcodeError(String(res.error));
+        return;
+      }
+
+      setShowBarcodeModal(false);
+      setEditingFormat(null);
+      setBarcodeForm(DEFAULT_BARCODE_FORM);
+      void loadBarcodeFormats(selectedNode.id);
+    } catch (e) {
+      setBarcodeError(String(e));
+    } finally {
+      setBarcodeSaving(false);
+    }
+  }
+
+  async function deleteBarcodeFormat(fmt: BarcodeFormat) {
+    if (!selectedNode || selectedNode.type !== "terminal") return;
+    if (!confirm("Bu formatı silmek istediğinizden emin misiniz?")) return;
+    try {
+      await apiFetch(`/barcode-formats/${fmt.id}`, { method: "DELETE" });
+      void loadBarcodeFormats(selectedNode.id);
+    } catch (e) {
+      setBarcodeError(String(e));
+    }
+  }
+
+  function openNewBarcodeModal() {
+    setEditingFormat(null);
+    setBarcodeForm(DEFAULT_BARCODE_FORM);
+    setBarcodeError(null);
+    setShowBarcodeModal(true);
+  }
+
+  function openEditBarcodeModal(fmt: BarcodeFormat) {
+    setEditingFormat(fmt);
+    setBarcodeForm({
+      flag_code: String(fmt.flag_code),
+      type: fmt.type,
+      integer_length: String(fmt.integer_length),
+      decimal_length: String(fmt.decimal_length),
+      label: fmt.label ?? "",
+      is_active: fmt.is_active,
+    });
+    setBarcodeError(null);
+    setShowBarcodeModal(true);
+  }
+
   // Ayar yükleme
   const loadSettings = useCallback(async (node: TreeNode) => {
     if (!companyId) return;
@@ -505,6 +656,15 @@ function PosSettingsPage() {
   }, [activeTab]);
 
   useEffect(() => {
+    if (selectedNode?.type === "terminal") {
+      void loadBarcodeFormats(selectedNode.id);
+    } else {
+      setBarcodeFormats([]);
+      setShowBarcodeModal(false);
+    }
+  }, [selectedNode, loadBarcodeFormats]);
+
+  useEffect(() => {
     if (tab !== "odeme_hesaplari") return;
     if (!selectedNode || selectedNode.type !== "terminal") return;
     void loadTerminalBrands(selectedNode.id);
@@ -512,7 +672,7 @@ function PosSettingsPage() {
 
   // Kasiyer seçilince yalnızca kasaya özel sekmeleri kapat
   useEffect(() => {
-    if (selectedNode?.type === "cashier" && (tab === "giris" || tab === "odeme_hesaplari")) {
+    if (selectedNode?.type === "cashier" && (tab === "giris" || tab === "odeme_hesaplari" || tab === "barkod")) {
       setTab("gorunum");
     }
   }, [selectedNode, tab]);
@@ -823,6 +983,180 @@ function PosSettingsPage() {
         </div>
       )}
 
+      {showBarcodeModal && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.45)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{
+            background: "white", borderRadius: 16, padding: 24, width: "min(480px, 95vw)",
+            maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 15, fontWeight: 700 }}>
+                {editingFormat ? "Format Düzenle" : "Yeni Barkod Formatı"}
+              </div>
+              <button type="button" onClick={() => setShowBarcodeModal(false)}
+                style={{ background: "none", border: "none", fontSize: 20, color: "#9CA3AF", cursor: "pointer" }}>
+                ✕
+              </button>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 5 }}>Bayrak Kodu (20–29)</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {Array.from({ length: 10 }, (_, i) => i + 20).map((fc) => (
+                  <button key={fc} type="button"
+                    onClick={() => setBarcodeForm((f) => ({ ...f, flag_code: String(fc) }))}
+                    style={{
+                      width: 40, padding: "8px 0", borderRadius: 7, cursor: "pointer",
+                      border: barcodeForm.flag_code === String(fc) ? "1.5px solid #1565C0" : "1px solid #E5E7EB",
+                      background: barcodeForm.flag_code === String(fc) ? "#EFF6FF" : "#F9FAFB",
+                      color: barcodeForm.flag_code === String(fc) ? "#1565C0" : "#374151",
+                      fontWeight: barcodeForm.flag_code === String(fc) ? 700 : 400,
+                      fontSize: 12,
+                    }}>{fc}</button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 5 }}>Tip</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {([
+                  { v: "weighted" as const, label: "⚖️ Tartılı", bg: "#FEF3C7", fg: "#D97706", border: "#FCD34D" },
+                  { v: "counted" as const, label: "🔢 Adetli", bg: "#E0F2FE", fg: "#0369A1", border: "#7DD3FC" },
+                ]).map((t) => (
+                  <button key={t.v} type="button"
+                    onClick={() => setBarcodeForm((f) => ({
+                      ...f,
+                      type: t.v,
+                      integer_length: t.v === "counted" ? "5" : "2",
+                      decimal_length: t.v === "counted" ? "0" : "3",
+                    }))}
+                    style={{
+                      padding: 10, borderRadius: 9, cursor: "pointer",
+                      border: barcodeForm.type === t.v ? `1.5px solid ${t.border}` : "1px solid #E5E7EB",
+                      background: barcodeForm.type === t.v ? t.bg : "white",
+                      color: barcodeForm.type === t.v ? t.fg : "#374151",
+                      fontWeight: barcodeForm.type === t.v ? 700 : 500,
+                      fontSize: 13,
+                    }}>{t.label}</button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ background: "#F9FAFB", borderRadius: 9, padding: 14, border: "1px solid #E5E7EB" }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#374151", marginBottom: 10 }}>
+                Miktar Alanı (toplam 5 hane)
+              </div>
+              {barcodeForm.type === "counted" ? (
+                <div style={{ fontSize: 12, color: "#6B7280" }}>
+                  Adetli barkodda 5 hane tam sayı olarak okunur.
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>Kilogram Kısmı (hane)</div>
+                      <select value={barcodeForm.integer_length}
+                        onChange={(e) => {
+                          const il = parseInt(e.target.value, 10);
+                          const dl = Math.max(0, 5 - il);
+                          setBarcodeForm((f) => ({
+                            ...f,
+                            integer_length: String(il),
+                            decimal_length: String(dl),
+                          }));
+                        }}
+                        style={{ width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5E7EB", fontSize: 13 }}>
+                        {[1, 2, 3, 4, 5].map((n) => (
+                          <option key={n} value={n}>{n} hane</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>Gram Kısmı (hane)</div>
+                      <input type="number" readOnly
+                        value={Math.max(0, 5 - (parseInt(barcodeForm.integer_length, 10) || 0))}
+                        style={{ width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5E7EB",
+                          fontSize: 13, background: "#F3F4F6", boxSizing: "border-box" }} />
+                    </div>
+                  </div>
+                  {(() => {
+                    const gramDigits = Math.max(0, 5 - (parseInt(barcodeForm.integer_length, 10) || 0));
+                    const pad = Math.max(0, 3 - gramDigits);
+                    if (pad === 0) return null;
+                    return (
+                      <div style={{ marginTop: 8, fontSize: 11, color: "#6B7280" }}>
+                        Gram {gramDigits} hane — 3 haneye tamamlamak için otomatik ×{10 ** pad} uygulanır.
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+
+              <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 7, background: "#EFF6FF", border: "1px solid #BFDBFE" }}>
+                <div style={{ fontSize: 10, color: "#1565C0", fontWeight: 600, marginBottom: 3 }}>Örnek barkod yapısı:</div>
+                <div style={{ fontFamily: "monospace", fontSize: 13, color: "#1565C0", letterSpacing: 2 }}>
+                  {barcodeForm.flag_code}
+                  {"P".repeat(5)}
+                  {"K".repeat(barcodeForm.type === "counted" ? 5 : (parseInt(barcodeForm.integer_length, 10) || 0))}
+                  {barcodeForm.type === "weighted"
+                    ? "G".repeat(Math.max(0, 5 - (parseInt(barcodeForm.integer_length, 10) || 0)))
+                    : ""}
+                  C
+                </div>
+                <div style={{ fontSize: 10, color: "#6B7280", marginTop: 4 }}>
+                  P=Ürün kodu · K=Tam kısım
+                  {barcodeForm.type === "weighted" ? " · G=Ondalık kısım" : ""}
+                  {" "}· C=Check digit
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>Etiket (opsiyonel)</div>
+              <input type="text" value={barcodeForm.label}
+                onChange={(e) => setBarcodeForm((f) => ({ ...f, label: e.target.value }))}
+                placeholder="örn. 15kg Terazi"
+                style={{ width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5E7EB",
+                  fontSize: 13, boxSizing: "border-box" }} />
+            </div>
+
+            <div onClick={() => setBarcodeForm((f) => ({ ...f, is_active: !f.is_active }))}
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", padding: "8px 0" }}>
+              <div style={{ fontSize: 13, fontWeight: 500 }}>Aktif</div>
+              <div style={{
+                width: 42, height: 24, borderRadius: 12, position: "relative",
+                background: barcodeForm.is_active ? "#1565C0" : "#E5E7EB", transition: "background 0.2s",
+              }}>
+                <div style={{
+                  position: "absolute", top: 3, width: 18, height: 18, borderRadius: "50%",
+                  background: "white", left: barcodeForm.is_active ? 21 : 3, transition: "left 0.2s",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                }} />
+              </div>
+            </div>
+
+            {barcodeError && (
+              <div style={{ padding: "8px 12px", borderRadius: 8, background: "#FEF2F2",
+                color: "#DC2626", fontSize: 12, border: "1px solid #FECACA" }}>
+                ✕ {barcodeError}
+              </div>
+            )}
+
+            <button type="button" onClick={() => void saveBarcodeFormat()} disabled={barcodeSaving}
+              style={{
+                padding: 12, borderRadius: 9, border: "none", background: "#111827", color: "white",
+                fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: barcodeSaving ? 0.7 : 1,
+              }}>
+              {barcodeSaving ? "Kaydediliyor..." : "Kaydet"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Ana layout */}
       <div style={{display:"flex",flex:1,overflow:"hidden",minHeight:0}}>
 
@@ -987,6 +1321,7 @@ function PosSettingsPage() {
                   {TABS
                     .filter(t => !(t.key === "giris" && selectedNode?.type === "cashier"))
                     .filter(t => !(t.key === "odeme_hesaplari" && selectedNode?.type !== "terminal"))
+                    .filter(t => !(t.key === "barkod" && selectedNode?.type !== "terminal"))
                     .map(t=>(
                     <button key={t.key} type="button" onClick={()=>setTab(t.key)}
                       style={{flex:1,padding:"9px 8px",borderRadius:7,cursor:"pointer",fontSize:13,
@@ -1000,7 +1335,7 @@ function PosSettingsPage() {
 
                 <div style={{background:"white",borderRadius:12,border:"1px solid #E5E7EB",padding:"4px 20px"}}>
 
-                  {tab !== "odeme_hesaplari" && (
+                  {tab !== "odeme_hesaplari" && tab !== "barkod" && (
                     <>
                   <Row label="Dokunmatik Klavye"
                     desc="Input alanlarına tıklayınca ekran klavyesi açılır">
@@ -1467,11 +1802,91 @@ function PosSettingsPage() {
                       </div>
                     );
                   })()}
+
+                  {tab === "barkod" && selectedNode?.type === "terminal" && (
+                    <div style={{ padding: "12px 0 16px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 700 }}>Barkod Format Tanımları</div>
+                          <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>
+                            EAN-13 dahili kullanım barkodları (20–29 bayrak kodları)
+                          </div>
+                        </div>
+                        <button type="button" onClick={openNewBarcodeModal}
+                          style={{ padding: "6px 14px", borderRadius: 8, border: "none",
+                            background: "#111827", color: "white", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                          + Ekle
+                        </button>
+                      </div>
+
+                      {barcodeFormats.length === 0 ? (
+                        <div style={{ padding: "24px 0", textAlign: "center", color: "#9CA3AF", fontSize: 12 }}>
+                          Henüz format tanımlanmadı
+                        </div>
+                      ) : barcodeFormats.map((fmt) => (
+                        <div key={fmt.id} style={{ display: "flex", alignItems: "center", gap: 12,
+                          padding: "10px 0", borderBottom: "1px solid #F9FAFB" }}>
+                          <div style={{
+                            width: 36, height: 36, borderRadius: 8, flexShrink: 0,
+                            background: fmt.is_active ? "#EFF6FF" : "#F3F4F6",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            fontSize: 14, fontWeight: 800,
+                            color: fmt.is_active ? "#1565C0" : "#9CA3AF",
+                          }}>
+                            {fmt.flag_code}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 13, fontWeight: 600, color: "#111827" }}>
+                                {fmt.label || `Bayrak ${fmt.flag_code}`}
+                              </span>
+                              <span style={{
+                                fontSize: 10, fontWeight: 600, padding: "2px 6px", borderRadius: 4,
+                                background: fmt.type === "weighted" ? "#FEF3C7" : "#E0F2FE",
+                                color: fmt.type === "weighted" ? "#D97706" : "#0369A1",
+                              }}>
+                                {fmt.type === "weighted" ? "Tartılı" : "Adetli"}
+                              </span>
+                              {!fmt.is_active && (
+                                <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 4,
+                                  background: "#F3F4F6", color: "#9CA3AF" }}>Pasif</span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>
+                              {fmt.type === "weighted"
+                                ? `Kg: ${fmt.integer_length} hane · Gram: ${fmt.decimal_length} hane`
+                                : "Miktar: 5 hane"}
+                            </div>
+                          </div>
+                          <div style={{
+                            fontSize: 10, color: "#9CA3AF", fontFamily: "monospace",
+                            background: "#F9FAFB", padding: "3px 7px", borderRadius: 5, flexShrink: 0,
+                          }}>
+                            {fmt.flag_code}{"P".repeat(5)}
+                            {"K".repeat(fmt.integer_length)}
+                            {fmt.decimal_length > 0 ? "G".repeat(fmt.decimal_length) : ""}C
+                          </div>
+                          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                            <button type="button" onClick={() => openEditBarcodeModal(fmt)}
+                              style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #E5E7EB",
+                                background: "#F9FAFB", fontSize: 11, color: "#374151", cursor: "pointer" }}>
+                              Düzenle
+                            </button>
+                            <button type="button" onClick={() => void deleteBarcodeFormat(fmt)}
+                              style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #FECACA",
+                                background: "#FEF2F2", fontSize: 11, color: "#DC2626", cursor: "pointer" }}>
+                              Sil
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                   </>
                 )}
 
-                {selectedNode?.type === "terminal" && activeTab === "general" && tab !== "odeme_hesaplari" && (
+                {selectedNode?.type === "terminal" && activeTab === "general" && tab !== "odeme_hesaplari" && tab !== "barkod" && (
                   <div style={{ marginTop: 24 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 8 }}>
                       Torba Cari
@@ -1649,7 +2064,7 @@ function PosSettingsPage() {
                   </div>
                 )}
 
-                {(selectedNode?.type !== "terminal" || (activeTab === "general" && tab !== "odeme_hesaplari")) && result&&(
+                {(selectedNode?.type !== "terminal" || (activeTab === "general" && tab !== "odeme_hesaplari" && tab !== "barkod")) && result&&(
                   <div style={{marginTop:12,padding:"12px 16px",borderRadius:8,fontSize:13,fontWeight:500,
                     background:result.ok?"#F0FDF4":"#FEF2F2",
                     border:`1px solid ${result.ok?"#BBF7D0":"#FECACA"}`,
@@ -1658,7 +2073,7 @@ function PosSettingsPage() {
                   </div>
                 )}
 
-                {(selectedNode?.type !== "terminal" || (activeTab === "general" && tab !== "odeme_hesaplari")) && (
+                {(selectedNode?.type !== "terminal" || (activeTab === "general" && tab !== "odeme_hesaplari" && tab !== "barkod")) && (
                   <button type="button" onClick={()=>void save()} disabled={saving}
                     style={{marginTop:16,width:"100%",padding:"14px",borderRadius:10,
                       background:saving?"#E0E0E0":"#1565C0",color:saving?"#9E9E9E":"white",
