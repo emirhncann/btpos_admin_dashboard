@@ -1887,6 +1887,22 @@ function PosSettingsPage() {
                 )}
 
                 {selectedNode?.type === "terminal" && activeTab === "general" && tab !== "odeme_hesaplari" && tab !== "barkod" && (
+                  <>
+                  <div style={{ marginTop: 24, padding: "16px 20px", background: "white", border: "1px solid #E5E7EB", borderRadius: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>Cari Tahsilatta Pavo Kullan</div>
+                        <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>
+                          Açıksa tahsilat Pavo üzerinden alınır — fiş ve e-belge oluşur
+                        </div>
+                      </div>
+                      <Toggle
+                        on={settings.cariPaymentUsePavo ?? false}
+                        onChange={() => set("cariPaymentUsePavo", !settings.cariPaymentUsePavo)}
+                      />
+                    </div>
+                  </div>
+
                   <div style={{ marginTop: 24 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 8 }}>
                       Torba Cari
@@ -1964,25 +1980,11 @@ function PosSettingsPage() {
                       </div>
                     )}
                   </div>
+                  </>
                 )}
 
                 {selectedNode?.type === "terminal" && activeTab === "payment" && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                    <div style={{ padding: "16px 20px", background: "white", border: "1px solid #E5E7EB", borderRadius: 12 }}>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div>
-                          <div style={{ fontSize: 13, fontWeight: 600 }}>Cari Tahsilatta Pavo Kullan</div>
-                          <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>
-                            Açıksa tahsilat Pavo üzerinden alınır — fiş ve e-belge oluşur
-                          </div>
-                        </div>
-                        <Toggle
-                          on={settings.cariPaymentUsePavo ?? false}
-                          onChange={() => set("cariPaymentUsePavo", !settings.cariPaymentUsePavo)}
-                        />
-                      </div>
-                    </div>
-
                     <div style={{ padding: "16px 20px", background: "#F8FAFF", border: "1px solid #C7D7FF", borderRadius: 12 }}>
                       <div style={{ fontSize: 13, fontWeight: 700, color: "#1D4ED8", marginBottom: 16 }}>
                         💳 Pavo Ödeme Cihazı

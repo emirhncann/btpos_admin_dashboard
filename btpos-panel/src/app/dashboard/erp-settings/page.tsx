@@ -7,7 +7,7 @@ import { apiFetch, apiRequest } from "@/services/api";
 import { USER_KEY } from "@/context/AuthContext";
 
 // ─── Tipler ────────────────────────────────────────────────────────────────────
-type ErpType = "logo-isbasi" | "mikro" | "custom";
+type ErpType = "logo-isbasi" | "vs" | "custom";
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 type LoadStatus = "loading" | "loaded" | "error";
 type TestStatus = "idle" | "testing" | "connected" | "error";
@@ -79,7 +79,7 @@ const WRITE_LIMIT = 7000;
 
 const ERP_TYPE_OPTIONS: { value: ErpType; label: string }[] = [
   { value: "logo-isbasi", label: "Logo İşbaşı" },
-  { value: "mikro",       label: "Mikro" },
+  { value: "vs",       label: "vs" },
   { value: "custom",      label: "Custom" },
 ];
 
