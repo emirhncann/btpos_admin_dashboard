@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef, type ReactNode, type CSSProperties } from "react";
+import { useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { withAuth } from "@/components/withAuth";
 import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
-import { sendCommand } from "@/services/api";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
@@ -12,7 +11,6 @@ type NodeType = "terminal" | "cashier";
 type Tab = "gorunum" | "satis" | "iskonto" | "plu_grid" | "giris" | "odeme_hesaplari" | "barkod";
 type DuplicateItemAction = "increase_qty" | "add_new";
 type PluMode = "terminal" | "cashier";
-type PavoPrintWidth = "58mm" | "80mm";
 type PavoInvoiceType = "e_archive" | "paper";
 type PrintBehaviorMode = "ask" | "default" | "none";
 type PrintBehaviorKey = "satis" | "tahsilat" | "odeme";
@@ -133,6 +131,252 @@ async function apiFetch<T = unknown>(path: string, options: RequestInit = {}): P
     headers: { ...authHeaders(), ...(options.headers as Record<string, string>) },
   });
   return res.json() as Promise<T>;
+}
+
+interface PavoDevice {
+  ip_address: string | null;
+  port: number | null;
+  serial_no: string | null;
+  card_read_timeout: number | null;
+  print_width: string | null;
+  updated_at: string | null;
+  updated_from: string | null;
+  last_paired_at: string | null;
+}
+
+interface ReceiptPrinterCloud {
+  enabled: boolean;
+  connection: string | null;
+  printerName: string | null;
+  ip: string | null;
+  port: number | null;
+  comPort: string | null;
+  baudRate: number | null;
+  paperWidth: string | null;
+  model: string | null;
+}
+
+interface ScaleCloud {
+  enabled: boolean;
+  brand: string | null;
+  connection: string | null;
+  comPort: string | null;
+  baudRate: number | null;
+  dataBits: number | null;
+  parity: string | null;
+  stopBits: number | null;
+  ip: string | null;
+  port: number | null;
+  barcodePrefix: string | null;
+}
+
+interface TerminalLocalBackup {
+  updated_at: string | null;
+  machine_name: string | null;
+  app_version: string | null;
+  receiptPrinter: ReceiptPrinterCloud | null;
+  scale: ScaleCloud | null;
+}
+
+const CONNECTION_LABEL: Record<string, string> = {
+  windows: "Windows",
+  network: "Ağ",
+  serial: "Seri",
+  usb: "USB",
+};
+
+function formatTrDateTime(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("tr-TR", {
+    timeZone: "Europe/Istanbul",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const pick = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  const day = pick("day");
+  const month = pick("month");
+  const year = pick("year");
+  const hour = pick("hour");
+  const minute = pick("minute");
+  if (!day || !month || !year || !hour || !minute) return null;
+  return `${day}.${month}.${year} ${hour}:${minute}`;
+}
+
+function formatAppVersion(raw: string | null | undefined): string | null {
+  const v = raw?.trim();
+  if (!v) return null;
+  return /^v/i.test(v) ? v : `v${v}`;
+}
+
+function textOrNull(value: unknown): string | null {
+  if (value == null) return null;
+  const s = String(value).trim();
+  return s.length > 0 ? s : null;
+}
+
+function numOrNull(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function isSettingEnabled(value: unknown): boolean {
+  return value === true || value === 1 || value === "1" || value === "true";
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "string") {
+    try {
+      return asRecord(JSON.parse(value) as unknown);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function connectionLabel(value: string | null): string | null {
+  if (!value) return null;
+  return CONNECTION_LABEL[value] ?? value;
+}
+
+function formatPaperWidth(value: unknown): string | null {
+  const raw = textOrNull(value);
+  if (!raw) return null;
+  return /^\d+$/.test(raw) ? `${raw}mm` : raw;
+}
+
+function mapReceiptPrinter(raw: unknown): ReceiptPrinterCloud | null {
+  const row = asRecord(raw);
+  if (!row) return null;
+  return {
+    enabled: isSettingEnabled(row.enabled),
+    connection: textOrNull(row.connection),
+    printerName: textOrNull(row.printerName),
+    ip: textOrNull(row.ip),
+    port: numOrNull(row.port),
+    comPort: textOrNull(row.comPort),
+    baudRate: numOrNull(row.baudRate),
+    paperWidth: formatPaperWidth(row.paperWidth),
+    model: textOrNull(row.model),
+  };
+}
+
+function mapScale(raw: unknown): ScaleCloud | null {
+  const row = asRecord(raw);
+  if (!row) return null;
+  return {
+    enabled: isSettingEnabled(row.enabled),
+    brand: textOrNull(row.brand),
+    connection: textOrNull(row.connection),
+    comPort: textOrNull(row.comPort),
+    baudRate: numOrNull(row.baudRate),
+    dataBits: numOrNull(row.dataBits),
+    parity: textOrNull(row.parity),
+    stopBits: numOrNull(row.stopBits),
+    ip: textOrNull(row.ip),
+    port: numOrNull(row.port),
+    barcodePrefix: textOrNull(row.barcodePrefix),
+  };
+}
+
+function printerLines(printer: ReceiptPrinterCloud): string[] {
+  const bits: string[] = [];
+  const conn = connectionLabel(printer.connection);
+  if (conn) bits.push(`Bağlantı: ${conn}`);
+  if ((printer.connection === "windows" || printer.connection === "usb") && printer.printerName) {
+    bits.push(`Yazıcı: ${printer.printerName}`);
+  }
+  if (printer.connection === "network" && printer.ip) {
+    bits.push(printer.port != null ? `IP: ${printer.ip} : ${printer.port}` : `IP: ${printer.ip}`);
+  }
+  if (printer.connection === "serial") {
+    if (printer.comPort) bits.push(printer.comPort);
+    if (printer.baudRate != null) bits.push(`${printer.baudRate} baud`);
+  }
+  if (printer.model) bits.push(`Model: ${printer.model}`);
+  const lines = bits.length > 0 ? [bits.join(" · ")] : [];
+  if (printer.paperWidth) lines.push(`Kâğıt: ${printer.paperWidth}`);
+  return lines;
+}
+
+function scaleLines(scale: ScaleCloud): string[] {
+  const bits: string[] = [];
+  if (scale.brand) bits.push(`Marka: ${scale.brand}`);
+  const conn = connectionLabel(scale.connection);
+  if (conn) bits.push(`Bağlantı: ${conn}`);
+  if (scale.connection === "serial") {
+    if (scale.comPort) bits.push(scale.comPort);
+    if (scale.baudRate != null) bits.push(`${scale.baudRate} baud`);
+    if (scale.dataBits != null) bits.push(`${scale.dataBits} bit`);
+    if (scale.parity) bits.push(scale.parity);
+    if (scale.stopBits != null) bits.push(`${scale.stopBits} stop`);
+  }
+  if (scale.connection === "network" && scale.ip) {
+    bits.push(scale.port != null ? `IP: ${scale.ip} : ${scale.port}` : `IP: ${scale.ip}`);
+  }
+  const lines = bits.length > 0 ? [bits.join(" · ")] : [];
+  if (scale.barcodePrefix) lines.push(`Barkod öneki: ${scale.barcodePrefix}`);
+  return lines;
+}
+
+function mapPavoDevice(row: Record<string, unknown>): PavoDevice {
+  const port = row.port == null || row.port === "" ? null : Number(row.port);
+  const timeout = row.card_read_timeout == null || row.card_read_timeout === ""
+    ? null
+    : Number(row.card_read_timeout);
+  return {
+    ip_address: textOrNull(row.ip_address),
+    port: port != null && Number.isFinite(port) ? port : null,
+    serial_no: textOrNull(row.serial_no),
+    card_read_timeout: timeout != null && Number.isFinite(timeout) ? timeout : null,
+    print_width: textOrNull(row.print_width),
+    updated_at: textOrNull(row.updated_at),
+    updated_from: textOrNull(row.updated_from),
+    last_paired_at: textOrNull(row.last_paired_at),
+  };
+}
+
+async function fetchPavoDevice(companyId: string, terminalId: string): Promise<PavoDevice | null> {
+  const res = await apiFetch<unknown>(`/payment-devices/${companyId}/${terminalId}`);
+  if (!Array.isArray(res)) return null;
+  const row = res.find((d) => {
+    if (!d || typeof d !== "object") return false;
+    return (d as Record<string, unknown>).provider === "pavo";
+  }) as Record<string, unknown> | undefined;
+  return row ? mapPavoDevice(row) : null;
+}
+
+async function fetchTerminalBackup(terminalId: string): Promise<TerminalLocalBackup | null> {
+  const res = await apiFetch<unknown>(`/terminal-local-settings/${terminalId}`);
+  if (!res || typeof res !== "object" || Array.isArray(res)) return null;
+  const row = res as Record<string, unknown>;
+  if (row.success === false) return null;
+  const settings = asRecord(row.settings);
+  const receiptPrinter = mapReceiptPrinter(settings?.receiptPrinter);
+  const scale = mapScale(settings?.scale);
+  if (
+    row.updated_at == null &&
+    row.machine_name == null &&
+    row.app_version == null &&
+    !receiptPrinter &&
+    !scale
+  ) return null;
+  return {
+    updated_at: textOrNull(row.updated_at),
+    machine_name: textOrNull(row.machine_name),
+    app_version: textOrNull(row.app_version),
+    receiptPrinter,
+    scale,
+  };
 }
 
 type CariRow = { code: string; name: string };
@@ -264,6 +508,36 @@ function GridPreview({ s }: { s: Settings }) {
 }
 
 // ─── Ana Sayfa ────────────────────────────────────────────────────────────────
+function DeviceCard({
+  title, color, border, background, defined, children,
+}: {
+  title: string;
+  color: string;
+  border: string;
+  background: string;
+  defined: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <div style={{
+      padding: "16px 20px", borderRadius: 12,
+      background: defined ? background : "#F9FAFB",
+      border: `1px solid ${defined ? border : "#E5E7EB"}`,
+    }}>
+      <div style={{
+        fontSize: 13, fontWeight: 700,
+        color: defined ? color : "#6B7280",
+        marginBottom: defined ? 10 : 8,
+      }}>
+        {title}
+      </div>
+      {defined ? children : (
+        <div style={{ fontSize: 13, color: "#9CA3AF" }}>Tanımlı değil</div>
+      )}
+    </div>
+  );
+}
+
 function PosSettingsPage() {
   const companyId = getCompanyId();
 
@@ -295,14 +569,10 @@ function PosSettingsPage() {
   const [cariLoading,   setCariLoading]   = useState(false);
   const cariSearchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [pavoIp,         setPavoIp]         = useState("");
-  const [pavoPort,       setPavoPort]       = useState(9100);
-  const [pavoSerialNo,   setPavoSerialNo]   = useState("");
-  const [pavoTimeout,    setPavoTimeout]    = useState(30);
-  const [pavoPrintWidth, setPavoPrintWidth] = useState<PavoPrintWidth>("80mm");
-  const [pairingPavo,    setPairingPavo]    = useState(false);
-  const [pavoPairResult, setPavoPairResult] = useState<{ ok: boolean; message?: string } | null>(null);
-  const [savingPayment, setSavingPayment] = useState(false);
+  const [pavoDevice, setPavoDevice] = useState<PavoDevice | null>(null);
+  const [terminalBackup, setTerminalBackup] = useState<TerminalLocalBackup | null>(null);
+  const [backupStatus, setBackupStatus] = useState<"idle" | "loading" | "ready">("idle");
+  const loadSeq = useRef(0);
 
   const [allBrands,       setAllBrands]       = useState<PaymentProviderBrand[]>([]);
   const [terminalBrands,  setTerminalBrands]  = useState<Record<string, number[]>>({});
@@ -315,98 +585,6 @@ function PosSettingsPage() {
   const [barcodeForm,      setBarcodeForm]      = useState<BarcodeFormState>(DEFAULT_BARCODE_FORM);
   const [barcodeSaving,    setBarcodeSaving]    = useState(false);
   const [barcodeError,     setBarcodeError]     = useState<string | null>(null);
-
-  async function loadPavoSettings(terminalId: string) {
-    if (!companyId) return;
-    try {
-      const res = await apiFetch<unknown[]>(`/payment-devices/${companyId}/${terminalId}`);
-      const pavo = Array.isArray(res)
-        ? res.find((d: unknown) => (d as Record<string, unknown>).provider === "pavo")
-        : null;
-      if (pavo) {
-        const p = pavo as Record<string, unknown>;
-        setPavoIp(String(p.ip_address ?? ""));
-        setPavoPort(Number(p.port ?? 9100));
-        setPavoSerialNo(String(p.serial_no ?? ""));
-        setPavoTimeout(Number(p.card_read_timeout ?? 30));
-        setPavoPrintWidth((p.print_width as PavoPrintWidth) ?? "80mm");
-      } else {
-        setPavoIp("");
-        setPavoPort(9100);
-        setPavoSerialNo("");
-        setPavoTimeout(30);
-        setPavoPrintWidth("80mm");
-      }
-    } catch {
-      // Pavo ayarı yoksa varsayılan değerler korunur.
-    }
-  }
-
-  async function savePavoSettings(terminalId: string) {
-    if (!companyId) return;
-    await apiFetch(`/payment-devices/${companyId}/${terminalId}`, {
-      method: "POST",
-      body: JSON.stringify({
-        provider: "pavo",
-        ip_address: pavoIp.trim() || null,
-        port: pavoPort,
-        serial_no: pavoSerialNo.trim() || null,
-        card_read_timeout: pavoTimeout,
-        print_width: pavoPrintWidth,
-        invoice_type: settings.invoiceType,
-      }),
-    });
-  }
-
-  async function handlePavoPair() {
-    if (!companyId || !selectedNode || selectedNode.type !== "terminal") return;
-    setPairingPavo(true);
-    setPavoPairResult(null);
-    try {
-      await savePavoSettings(selectedNode.id);
-      const cmd = await sendCommand({
-        company_id: companyId,
-        command: "pair_pavo",
-        payload: { ip: pavoIp, port: pavoPort, serial_no: pavoSerialNo },
-        send_to_all: false,
-        terminal_ids: [selectedNode.id],
-      });
-      setPavoPairResult({ ok: cmd.success, message: cmd.message });
-    } catch (e) {
-      setPavoPairResult({ ok: false, message: String(e) });
-    } finally {
-      setPairingPavo(false);
-    }
-  }
-
-  async function savePaymentSettings() {
-    if (!selectedNode || selectedNode.type !== "terminal" || !companyId) return;
-    setSavingPayment(true);
-    setResult(null);
-    try {
-      await savePavoSettings(selectedNode.id);
-      const body: Record<string, unknown> = {
-        company_id: companyId,
-        terminal_id: selectedNode.id,
-        cari_payment_use_pavo: settings.cariPaymentUsePavo,
-      };
-      if (selectedNode.workplaceId) body.workplace_id = selectedNode.workplaceId;
-      const d = await apiFetch<{ success?: boolean; message?: string }>(
-        "/pos-settings/save",
-        { method: "POST", body: JSON.stringify(body) }
-      );
-      if (d.success) {
-        setResult({ ok: true, text: "Ödeme ayarları kaydedildi ✓" });
-        void loadSettings(selectedNode);
-      } else {
-        setResult({ ok: false, text: d.message ?? "Kayıt başarısız." });
-      }
-    } catch {
-      setResult({ ok: false, text: "Sunucuya ulaşılamadı." });
-    } finally {
-      setSavingPayment(false);
-    }
-  }
 
   // Veri yükleme
   const loadAll = useCallback(async () => {
@@ -422,6 +600,29 @@ function PosSettingsPage() {
   }, [companyId]);
 
   useEffect(() => { void loadAll(); }, [loadAll]);
+
+  const terminalQueryApplied = useRef(false);
+  useEffect(() => {
+    if (terminalQueryApplied.current || typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get("tab");
+    if (tab === "devices" || tab === "payment") setActiveTab("payment");
+    const terminalId = params.get("terminal");
+    if (!terminalId) {
+      terminalQueryApplied.current = true;
+      return;
+    }
+    if (terminals.length === 0) return;
+    const terminal = terminals.find((item) => item.id === terminalId);
+    terminalQueryApplied.current = true;
+    if (!terminal) return;
+    setSelectedNode({
+      type: "terminal",
+      id: terminal.id,
+      label: terminal.terminal_name,
+      workplaceId: terminal.workplace_id,
+    });
+  }, [terminals]);
 
   useEffect(() => {
     void apiFetch<PaymentProviderBrand[]>("/payment-provider-brands")
@@ -567,9 +768,16 @@ function PosSettingsPage() {
   // Ayar yükleme
   const loadSettings = useCallback(async (node: TreeNode) => {
     if (!companyId) return;
+    const seq = ++loadSeq.current;
     setLoading(true); setResult(null); setImportResult(null);
     if (node.type === "terminal") {
-      void loadPavoSettings(node.id);
+      setBackupStatus("loading");
+      setPavoDevice(null);
+      setTerminalBackup(null);
+    } else {
+      setPavoDevice(null);
+      setTerminalBackup(null);
+      setBackupStatus("idle");
     }
     try {
       const p = new URLSearchParams({ company_id: companyId });
@@ -577,7 +785,25 @@ function PosSettingsPage() {
       if (node.type === "cashier")  p.append("cashier_id",  node.id);
       if (node.workplaceId)         p.append("workplace_id", node.workplaceId);
 
-      const d = await apiFetch<Record<string,unknown>>(`/pos-settings/resolve?${p.toString()}`);
+      const devicePromise = node.type === "terminal"
+        ? fetchPavoDevice(companyId, node.id).catch(() => null)
+        : Promise.resolve(null);
+      const backupPromise = node.type === "terminal"
+        ? fetchTerminalBackup(node.id).catch(() => null)
+        : Promise.resolve(null);
+      const [settingsResult, deviceResult, backupResult] = await Promise.allSettled([
+        apiFetch<Record<string,unknown>>(`/pos-settings/resolve?${p.toString()}`),
+        devicePromise,
+        backupPromise,
+      ]);
+      if (seq !== loadSeq.current) return;
+      if (node.type === "terminal") {
+        setPavoDevice(deviceResult.status === "fulfilled" ? deviceResult.value : null);
+        setTerminalBackup(backupResult.status === "fulfilled" ? backupResult.value : null);
+        setBackupStatus("ready");
+      }
+      if (settingsResult.status === "rejected") throw settingsResult.reason;
+      const d = settingsResult.value;
       if (node.type === "cashier") {
         setTorbaCariId("");
         setTorbaCariName("");
@@ -620,12 +846,14 @@ function PosSettingsPage() {
         workplace:"İşyerinden miras", company:"Firma genelinden miras",
         default:"Varsayılan ayarlar" } as Record<string,string>)[src] ?? src);
     } catch {
+      if (seq !== loadSeq.current) return;
       setSettings(DEFAULT);
       setSourceLabel("Yüklenemedi");
       setTorbaCariId("");
       setTorbaCariName("");
     }
     finally  {
+      if (seq !== loadSeq.current) return;
       if (node.type === "cashier") {
         setTab((prev) => (prev === "giris" ? "gorunum" : prev));
       }
@@ -642,18 +870,11 @@ function PosSettingsPage() {
       setTorbaCariName("");
       setCariSearch("");
       setCariResults([]);
-      setPavoIp("");
-      setPavoPort(9100);
-      setPavoSerialNo("");
-      setPavoTimeout(30);
-      setPavoPrintWidth("80mm");
-      setPavoPairResult(null);
+      setPavoDevice(null);
+      setTerminalBackup(null);
+      setBackupStatus("idle");
     }
   }, [selectedNode, loadSettings]);
-
-  useEffect(() => {
-    setPavoPairResult(null);
-  }, [activeTab]);
 
   useEffect(() => {
     if (selectedNode?.type === "terminal") {
@@ -717,9 +938,6 @@ function PosSettingsPage() {
     if (selectedNode.type === "cashier")  body.cashier_id  = selectedNode.id;
     if (selectedNode.workplaceId)         body.workplace_id = selectedNode.workplaceId;
     try {
-      if (selectedNode.type === "terminal") {
-        await savePavoSettings(selectedNode.id);
-      }
       const d = await apiFetch<{ success?: boolean; message?: string }>(
         "/pos-settings/save", { method:"POST", body:JSON.stringify(body) }
       );
@@ -850,20 +1068,6 @@ function PosSettingsPage() {
   }
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setSettings(s => ({...s,[k]:v}));
-  const inputStyle: CSSProperties = {
-    width: "100%",
-    border: "1px solid #E0E0E0",
-    borderRadius: 8,
-    padding: "8px 12px",
-    fontSize: 13,
-    outline: "none",
-    boxSizing: "border-box",
-  };
-  const lbl = (text: string) => (
-    <label style={{ fontSize: 11, fontWeight: 600, color: "#6B7280", display: "block", marginBottom: 4 }}>
-      {text}
-    </label>
-  );
 
   const runCariSearch = useCallback(
     async (q: string) => {
@@ -1296,7 +1500,7 @@ function PosSettingsPage() {
                   <div style={{ display: "flex", gap: 0, borderBottom: "2px solid #E5E7EB", marginBottom: 20 }}>
                     {[
                       { key: "general", label: "⚙️ Genel Ayarlar" },
-                      { key: "payment", label: "💳 Ödeme Cihazı" },
+                      { key: "payment", label: "🖨️ Cihazlar" },
                     ].map((tabItem) => (
                       <button key={tabItem.key} type="button"
                         onClick={() => setActiveTab(tabItem.key as typeof activeTab)}
@@ -1983,88 +2187,87 @@ function PosSettingsPage() {
                   </>
                 )}
 
-                {selectedNode?.type === "terminal" && activeTab === "payment" && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                    <div style={{ padding: "16px 20px", background: "#F8FAFF", border: "1px solid #C7D7FF", borderRadius: 12 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "#1D4ED8", marginBottom: 16 }}>
-                        💳 Pavo Ödeme Cihazı
-                      </div>
-
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                        <div style={{ gridColumn: "span 2" }}>
-                          {lbl("IP Adresi")}
-                          <input value={pavoIp} onChange={(e) => setPavoIp(e.target.value)} placeholder="192.168.1.100" style={inputStyle} />
+                {selectedNode?.type === "terminal" && activeTab === "payment" && (() => {
+                  const printer = terminalBackup?.receiptPrinter ?? null;
+                  const scale = terminalBackup?.scale ?? null;
+                  const printerOn = Boolean(printer?.enabled);
+                  const scaleOn = Boolean(scale?.enabled);
+                  const pavoCells: string[] = [];
+                  if (pavoDevice?.ip_address) {
+                    pavoCells.push(
+                      pavoDevice.port != null
+                        ? `IP: ${pavoDevice.ip_address} : ${pavoDevice.port}`
+                        : `IP: ${pavoDevice.ip_address}`,
+                    );
+                  }
+                  if (pavoDevice?.serial_no) pavoCells.push(`Seri No: ${pavoDevice.serial_no}`);
+                  if (pavoDevice?.card_read_timeout != null) {
+                    pavoCells.push(`Kart okuma: ${pavoDevice.card_read_timeout} sn`);
+                  }
+                  if (pavoDevice?.print_width) pavoCells.push(`Fiş: ${pavoDevice.print_width}`);
+                  const pavoMeta: string[] = [];
+                  const updated = formatTrDateTime(pavoDevice?.updated_at);
+                  if (updated) {
+                    pavoMeta.push(`Son güncelleme: ${updated}${pavoDevice?.updated_from === "pos" ? " (kasadan)" : ""}`);
+                  }
+                  const paired = formatTrDateTime(pavoDevice?.last_paired_at);
+                  if (paired) pavoMeta.push(`Son eşleştirme: ${paired}`);
+                  const backupLine = backupStatus !== "ready"
+                    ? "☁ Son yedek yükleniyor..."
+                    : terminalBackup
+                      ? `☁ Son yedek: ${formatTrDateTime(terminalBackup.updated_at) ?? "—"} · PC: ${terminalBackup.machine_name ?? "—"} · ${formatAppVersion(terminalBackup.app_version) ?? "—"}`
+                      : "☁ Son yedek: Henüz yedek yok";
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      <DeviceCard
+                        title="💳 Ödeme Cihazı — Pavo"
+                        color="#1D4ED8"
+                        border="#C7D7FF"
+                        background="#F8FAFF"
+                        defined={Boolean(pavoDevice)}
+                      >
+                        <div style={{
+                          display: "grid", gridTemplateColumns: "1fr 1fr",
+                          rowGap: 8, columnGap: 24, fontSize: 13, color: "#111827",
+                        }}>
+                          {pavoCells.map((cell) => <div key={cell}>{cell}</div>)}
+                          {pavoMeta.length > 0 && (
+                            <div style={{ gridColumn: "1 / -1" }}>{pavoMeta.join(" · ")}</div>
+                          )}
                         </div>
+                      </DeviceCard>
 
-                        <div>
-                          {lbl("Port")}
-                          <input type="number" value={pavoPort} onChange={(e) => setPavoPort(Number(e.target.value))} placeholder="9100" style={inputStyle} />
+                      <DeviceCard
+                        title="🧾 Fiş Yazıcı"
+                        color="#166534"
+                        border="#BBF7D0"
+                        background="#F0FDF4"
+                        defined={printerOn}
+                      >
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13, color: "#111827" }}>
+                          {printer ? printerLines(printer).map((line) => <div key={line}>{line}</div>) : null}
                         </div>
+                      </DeviceCard>
 
-                        <div>
-                          {lbl("Seri No")}
-                          <input value={pavoSerialNo} onChange={(e) => setPavoSerialNo(e.target.value)} placeholder="PAV860085386" style={inputStyle} />
+                      <DeviceCard
+                        title="⚖️ Terazi"
+                        color="#92400E"
+                        border="#FDE68A"
+                        background="#FFFBEB"
+                        defined={scaleOn}
+                      >
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 13, color: "#111827" }}>
+                          {scale ? scaleLines(scale).map((line) => <div key={line}>{line}</div>) : null}
                         </div>
+                      </DeviceCard>
 
-                        <div>
-                          {lbl("Kart Okuma Zaman Aşımı (sn)")}
-                          <input type="number" value={pavoTimeout} onChange={(e) => setPavoTimeout(Number(e.target.value))} placeholder="30" style={inputStyle} />
-                        </div>
-
-                        <div>
-                          {lbl("Fiş Genişliği")}
-                          <div style={{ display: "flex", gap: 8 }}>
-                            {(["58mm", "80mm"] as const).map((w) => (
-                              <button key={w} type="button" onClick={() => setPavoPrintWidth(w)}
-                                style={{ flex: 1, padding: "8px", borderRadius: 8, border: "1px solid",
-                                  background: pavoPrintWidth === w ? "#EFF6FF" : "white",
-                                  borderColor: pavoPrintWidth === w ? "#3B82F6" : "#E0E0E0",
-                                  color: pavoPrintWidth === w ? "#1D4ED8" : "#6B7280",
-                                  fontWeight: pavoPrintWidth === w ? 600 : 400,
-                                  fontSize: 13, cursor: "pointer" }}>
-                                {w}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div style={{ display: "flex", gap: 8, marginTop: 16, alignItems: "center" }}>
-                        <button type="button" onClick={() => void savePaymentSettings()}
-                          disabled={savingPayment}
-                          style={{ background: savingPayment ? "#93C5FD" : "#1565C0", color: "white",
-                            border: "none", borderRadius: 8, padding: "9px 20px",
-                            fontSize: 13, fontWeight: 600, cursor: savingPayment ? "wait" : "pointer" }}>
-                          {savingPayment ? "Kaydediliyor..." : "Kaydet"}
-                        </button>
-
-                        <button type="button" onClick={() => void handlePavoPair()}
-                          disabled={!pavoIp || pairingPavo}
-                          style={{ padding: "9px 18px", borderRadius: 8, border: "1px solid #90CAF9",
-                            background: "#E3F2FD", color: "#1565C0", fontSize: 13, fontWeight: 600,
-                            cursor: !pavoIp || pairingPavo ? "default" : "pointer",
-                            opacity: !pavoIp || pairingPavo ? 0.5 : 1 }}>
-                          {pairingPavo ? "⟳ Eşleştiriliyor..." : "🔗 Eşleştir"}
-                        </button>
-
-                        {pavoPairResult && (
-                          <span style={{ fontSize: 12, color: pavoPairResult.ok ? "#2E7D32" : "#C62828" }}>
-                            {pavoPairResult.ok ? "✓ Eşleştirme başarılı" : `✗ ${pavoPairResult.message}`}
-                          </span>
-                        )}
+                      <div style={{ fontSize: 12, color: "#6B7280", lineHeight: 1.6 }}>
+                        <div>{backupLine}</div>
+                        <div>ℹ Cihazlar kasanın Ayarlar ekranından tanımlanır.</div>
                       </div>
                     </div>
-                  </div>
-                )}
-
-                {selectedNode?.type === "terminal" && activeTab === "payment" && result && (
-                  <div style={{ marginTop: 12, padding: "12px 16px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-                    background: result.ok ? "#F0FDF4" : "#FEF2F2",
-                    border: `1px solid ${result.ok ? "#BBF7D0" : "#FECACA"}`,
-                    color: result.ok ? "#166534" : "#991B1B" }}>
-                    {result.text}
-                  </div>
-                )}
+                  );
+                })()}
 
                 {(selectedNode?.type !== "terminal" || (activeTab === "general" && tab !== "odeme_hesaplari" && tab !== "barkod")) && result&&(
                   <div style={{marginTop:12,padding:"12px 16px",borderRadius:8,fontSize:13,fontWeight:500,

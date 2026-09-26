@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { withAuth } from "@/components/withAuth";
 import { apiRequest } from "@/services/api";
-import { USER_KEY } from "@/context/AuthContext";
+import { TOKEN_KEY, USER_KEY, triggerForceLogout } from "@/context/AuthContext";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
 // ─── Tipler ────────────────────────────────────────────────────────────────────
 type CashierRole = "cashier" | "manager";
@@ -114,29 +116,68 @@ function StatusBadge({ active }: { active: boolean }) {
 }
 
 // ─── Modal ─────────────────────────────────────────────────────────────────────
+function smallestFreeCode(used: string[], skip: string[] = []): string {
+  const taken = new Set<number>();
+  for (const raw of [...used, ...skip]) {
+    const s = raw.trim();
+    if (!/^\d+$/.test(s)) continue;
+    const n = Number(s);
+    if (n >= 1 && n <= 9_999_999_999) taken.add(n);
+  }
+  let n = 1;
+  while (taken.has(n) && n <= 9_999_999_999) n += 1;
+  return n <= 9_999_999_999 ? String(n) : "";
+}
+
 function AddCashierModal({
   onClose,
   onSuccess,
   companyId,
+  usedCodes,
 }: {
   onClose: () => void;
   onSuccess: () => void;
   companyId: string;
+  usedCodes: string[];
 }) {
   const [form, setForm]         = useState<AddForm>(EMPTY_FORM);
   const [showPw, setShowPw]     = useState(false);
   const [status, setStatus]     = useState<SubmitStatus>("idle");
   const [error, setError]       = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof AddForm, string>>>({});
+  const [suggesting, setSuggesting] = useState(false);
+  const codeTouched = useRef(false);
 
   const set = <K extends keyof AddForm>(k: K) => (v: AddForm[K]) =>
     setForm((p) => ({ ...p, [k]: v }));
 
+  function suggestCode(onlyIfEmpty = false) {
+    setSuggesting(true);
+    setForm((prev) => {
+      if (onlyIfEmpty && (codeTouched.current || prev.cashier_code)) return prev;
+      const skip = onlyIfEmpty || !prev.cashier_code ? [] : [prev.cashier_code];
+      const code = smallestFreeCode(usedCodes, skip);
+      return code ? { ...prev, cashier_code: code } : prev;
+    });
+    setFieldErrors((prev) => ({ ...prev, cashier_code: undefined }));
+    setSuggesting(false);
+  }
+
+  useEffect(() => {
+    suggestCode(true);
+    // ilk açılışta boş alana 1'den itibaren ilk boş numarayı yaz
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const validate = (): boolean => {
     const errs: Partial<Record<keyof AddForm, string>> = {};
-    if (!form.full_name.trim())            errs.full_name    = "Ad Soyad zorunludur.";
-    if (!/^\d{6}$/.test(form.cashier_code)) errs.cashier_code = "Tam 6 rakam olmalıdır.";
-    if (form.password.length < 4)          errs.password     = "En az 4 karakter giriniz.";
+    if (!form.full_name.trim()) errs.full_name = "Ad Soyad zorunludur.";
+    if (!/^\d{1,10}$/.test(form.cashier_code)) {
+      errs.cashier_code = form.cashier_code
+        ? "Sadece rakam, 1–10 hane olmalıdır."
+        : "Kasiyer kodu zorunludur.";
+    }
+    if (form.password.length < 4) errs.password = "En az 4 karakter giriniz.";
     setFieldErrors(errs);
     return Object.keys(errs).length === 0;
   };
@@ -149,8 +190,13 @@ function AddCashierModal({
     setError(null);
 
     try {
-      const res = await apiRequest("/cashiers/add", {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const response = await fetch(`${API_URL}/cashiers/add`, {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
           company_id:   companyId,
           full_name:    form.full_name.trim(),
@@ -160,8 +206,22 @@ function AddCashierModal({
           ...(form.card_number.trim() ? { card_number: form.card_number.trim() } : {}),
         }),
       });
+      if (response.status === 401) {
+        triggerForceLogout();
+        return;
+      }
+      const res = await response.json() as { success?: boolean; message?: string };
 
-      if (res.success === false) {
+      if (response.status === 409) {
+        setStatus("idle");
+        setFieldErrors((prev) => ({
+          ...prev,
+          cashier_code: "Bu kasiyer kodu zaten kullanılıyor",
+        }));
+        return;
+      }
+
+      if (!response.ok || res.success === false) {
         setStatus("error");
         setError(res.message ?? "Kasiyer oluşturulamadı.");
         return;
@@ -237,21 +297,48 @@ function AddCashierModal({
               <label className="block text-sm font-medium text-gray-700 mb-1.5">
                 Kasiyer Kodu <span className="text-red-500">*</span>
               </label>
-              <input
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                value={form.cashier_code}
-                onChange={(e) => set("cashier_code")(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                placeholder="123456"
-                className={`w-full px-3 py-2.5 text-sm border rounded-lg font-mono text-gray-800 placeholder-gray-400
-                  bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all
-                  ${fieldErrors.cashier_code ? "border-red-300" : "border-gray-200"}`}
-              />
-              {fieldErrors.cashier_code ? (
-                <p className="mt-1 text-xs text-red-500">{fieldErrors.cashier_code}</p>
-              ) : (
-                <p className="mt-1 text-xs text-gray-400">Tam 6 rakam</p>
+              <div className="flex gap-1.5">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={10}
+                  value={form.cashier_code}
+                  onChange={(e) => {
+                    codeTouched.current = true;
+                    set("cashier_code")(e.target.value.replace(/\D/g, "").slice(0, 10));
+                    setFieldErrors((prev) => (
+                      prev.cashier_code ? { ...prev, cashier_code: undefined } : prev
+                    ));
+                  }}
+                  placeholder="1"
+                  className={`min-w-0 flex-1 px-3 py-2.5 text-sm border rounded-lg font-mono text-gray-800 placeholder-gray-400
+                    bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all
+                    ${fieldErrors.cashier_code ? "border-red-300" : "border-gray-200"}`}
+                />
+                <button
+                  type="button"
+                  onClick={() => void suggestCode(false)}
+                  disabled={suggesting}
+                  className="shrink-0 px-2.5 text-xs font-semibold rounded-lg border border-gray-200 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-default"
+                >
+                  {suggesting ? "…" : "Numara Ver"}
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-gray-400">Sadece rakam. Örn: 1, 2, 15</p>
+              {fieldErrors.cashier_code && (
+                <p className="mt-1 text-xs text-red-500 flex items-center gap-2 flex-wrap">
+                  {fieldErrors.cashier_code}
+                  {fieldErrors.cashier_code === "Bu kasiyer kodu zaten kullanılıyor" && (
+                    <button
+                      type="button"
+                      onClick={() => void suggestCode(false)}
+                      disabled={suggesting}
+                      className="font-semibold underline disabled:opacity-50"
+                    >
+                      Numara Ver
+                    </button>
+                  )}
+                </p>
               )}
             </div>
 
@@ -1040,6 +1127,7 @@ function CashiersPage() {
       {showModal && companyId && (
         <AddCashierModal
           companyId={companyId}
+          usedCodes={cashiers.map((c) => c.cashier_code)}
           onClose={() => setShowModal(false)}
           onSuccess={fetchCashiers}
         />
