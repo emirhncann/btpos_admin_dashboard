@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { withAuth } from "@/components/withAuth";
 import { apiFetch, getCompanyId } from "@/services/api";
+import { VersionHint, fetchAvailableReleases, latestRelease } from "@/lib/appRelease";
 import {
   parseDashboardSummary,
   type AlertLevel,
@@ -29,6 +30,7 @@ const COMMAND_LABELS: Record<string, string> = {
   message: "Mesaj",
   restart: "Yeniden başlat",
   lock: "Kilitle",
+  update_app: "Uygulama güncelle",
 };
 
 const LEVEL_DOT: Record<AlertLevel, string> = {
@@ -212,6 +214,7 @@ function DashboardPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(false);
   const [showAllAlerts, setShowAllAlerts] = useState(false);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
@@ -234,6 +237,9 @@ function DashboardPage() {
       setSummary(parsed);
       writeCache(companyId, parsed);
       setError(false);
+      const releases = await fetchAvailableReleases(companyId);
+      if (seq !== loadSeq.current) return;
+      setLatestVersion(latestRelease(releases)?.version ?? null);
     } catch {
       if (seq !== loadSeq.current) return;
       setError(true);
@@ -416,7 +422,7 @@ function DashboardPage() {
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                     <thead>
                       <tr style={{ textAlign: "left", color: "#6B7280", fontSize: 11 }}>
-                        {["Kasa", "İşyeri", "Son haber", "Ödeme cihazı", "Ayar yedeği", "Son komut"].map((head) => (
+                        {["Kasa", "İşyeri", "Sürüm", "Son haber", "Ödeme cihazı", "Ayar yedeği", "Son komut"].map((head) => (
                           <th key={head} style={{ padding: "10px 12px", fontWeight: 600, borderBottom: "1px solid #E5E7EB", whiteSpace: "nowrap" }}>
                             {head === "Son haber" ? (
                               <span title="Kasanın merkeze son ulaştığı zaman (komut yanıtı veya ayar yedeği).">
@@ -444,6 +450,9 @@ function DashboardPage() {
                               </span>
                             </td>
                             <td style={{ padding: "12px", borderBottom: "1px solid #F3F4F6" }}>{terminal.workplace_name ?? "—"}</td>
+                            <td style={{ padding: "12px", borderBottom: "1px solid #F3F4F6" }}>
+                              <VersionHint current={terminal.app_version} latest={latestVersion} />
+                            </td>
                             <td style={{ padding: "12px", borderBottom: "1px solid #F3F4F6" }}>
                               <SeenCell lastSeen={terminal.last_seen} />
                             </td>
@@ -487,6 +496,7 @@ function DashboardPage() {
                           {!terminal.is_installed && <Pill text="Kurulmadı" color="#6B7280" bg="#F3F4F6" />}
                         </div>
                         <div><span style={{ color: "#6B7280" }}>İşyeri: </span>{terminal.workplace_name ?? "—"}</div>
+                        <div><span style={{ color: "#6B7280" }}>Sürüm: </span><VersionHint current={terminal.app_version} latest={latestVersion} /></div>
                         <div><span style={{ color: "#6B7280" }}>Son haber: </span><SeenCell lastSeen={terminal.last_seen} /></div>
                         <div><span style={{ color: "#6B7280" }}>Ödeme cihazı: </span><DeviceCell terminal={terminal} /></div>
                         <div style={{ color: backup.empty ? "#9CA3AF" : "#111827" }}>

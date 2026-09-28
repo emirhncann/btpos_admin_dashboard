@@ -49,6 +49,7 @@ export interface DashboardTerminal {
   last_command: TerminalLastCommand | null;
   pending_commands: number;
   last_seen: string | null;
+  app_version: string | null;
 }
 
 export interface DashboardSummary {
@@ -152,6 +153,7 @@ function mapTerminal(value: unknown): DashboardTerminal | null {
   if (!row) return null;
   const id = textOrNull(row.id);
   if (!id) return null;
+  const backup = mapBackup(row.backup);
   return {
     id,
     terminal_name: textOrNull(row.terminal_name ?? row.name) ?? "Kasa",
@@ -163,10 +165,11 @@ function mapTerminal(value: unknown): DashboardTerminal | null {
         ? asBool(row.is_active)
         : true,
     pavo: mapPavo(row.pavo),
-    backup: mapBackup(row.backup),
+    backup,
     last_command: mapLastCommand(row.last_command),
     pending_commands: numOrZero(row.pending_commands),
     last_seen: textOrNull(row.last_seen),
+    app_version: textOrNull(row.app_version) ?? backup?.app_version ?? null,
   };
 }
 

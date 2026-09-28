@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef, type ReactNode } from "react";
+import Link from "next/link";
 import { withAuth } from "@/components/withAuth";
 import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
+import { VersionHint, fetchAvailableReleases, latestRelease } from "@/lib/appRelease";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
@@ -17,7 +19,14 @@ type PrintBehaviorKey = "satis" | "tahsilat" | "odeme";
 
 interface TreeNode { type: NodeType; id: string; label: string; workplaceId?: string }
 interface Workplace { id: string; name: string }
-interface Terminal  { id: string; terminal_name: string; workplace_id?: string; is_installed: boolean }
+interface Terminal  {
+  id: string;
+  terminal_name: string;
+  terminal_number?: string | null;
+  workplace_id?: string;
+  is_installed: boolean;
+  app_version?: string | null;
+}
 interface Cashier   { id: string; full_name: string; cashier_code: string }
 
 interface PaymentProviderBrand {
@@ -543,6 +552,7 @@ function PosSettingsPage() {
 
   const [workplaces,   setWorkplaces]   = useState<Workplace[]>([]);
   const [terminals,    setTerminals]    = useState<Terminal[]>([]);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [cashiers,     setCashiers]     = useState<Cashier[]>([]);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
 
@@ -589,11 +599,13 @@ function PosSettingsPage() {
   // Veri yükleme
   const loadAll = useCallback(async () => {
     if (!companyId) return;
-    const [wpD, tD, cD] = await Promise.all([
+    const [wpD, tD, cD, releases] = await Promise.all([
       apiFetch<unknown>(`/workplaces/${companyId}`),
       apiFetch<unknown>(`/management/licenses/terminals/${companyId}`),
       apiFetch<unknown>(`/cashiers/${companyId}`),
+      fetchAvailableReleases(companyId),
     ]);
+    setLatestVersion(latestRelease(releases)?.version ?? null);
     setWorkplaces(Array.isArray(wpD) ? (wpD as Workplace[]) : []);
     setTerminals( Array.isArray(tD)  ? (tD  as Terminal[]).filter(t => t.is_installed) : []);
     setCashiers(  Array.isArray(cD)  ? (cD  as Cashier[])  : []);
@@ -1367,9 +1379,17 @@ function PosSettingsPage() {
         {/* Sol: Ağaç */}
         <aside style={{width:220,flexShrink:0,display:"flex",flexDirection:"column",
           borderRight:"1px solid #E5E7EB",background:"white",overflow:"hidden"}}>
-          <div style={{padding:"10px 12px",borderBottom:"1px solid #F0F0F0",
-            fontSize:11,fontWeight:700,color:"#374151",textTransform:"uppercase",letterSpacing:"0.5px"}}>
-            POS Ayarları
+          <div style={{padding:"10px 12px",borderBottom:"1px solid #F0F0F0"}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#374151",textTransform:"uppercase",letterSpacing:"0.5px"}}>
+              POS Ayarları
+            </div>
+            <Link href="/dashboard/updates" style={{
+              display:"block", marginTop:8, textAlign:"center", textDecoration:"none",
+              padding:"7px 8px", borderRadius:8, fontSize:12, fontWeight:700,
+              background:"#1565C0", color:"white",
+            }}>
+              Kasaları Güncelle
+            </Link>
           </div>
           <div style={{flex:1,overflowY:"auto"}}>
             {workplaces.map(wp=>{
@@ -1394,8 +1414,14 @@ function PosSettingsPage() {
                           borderLeft:`3px solid ${act?"#8B5CF6":"transparent"}`,
                           borderBottom:"1px solid #F9FAFB"}}>
                         <span style={{fontSize:12}}>🖥</span>
-                        <span style={{fontSize:12,flex:1,color:act?"#6D28D9":"#374151",fontWeight:act?600:400}}>
-                          {t.terminal_name}
+                        <span style={{flex:1,minWidth:0}}>
+                          <span style={{display:"block",fontSize:12,color:act?"#6D28D9":"#374151",fontWeight:act?600:400,
+                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            {t.terminal_name}
+                          </span>
+                          <span style={{display:"block",fontSize:10,color:"#6B7280",marginTop:1}}>
+                            <VersionHint current={t.app_version} latest={latestVersion} />
+                          </span>
                         </span>
                       </div>
                     );

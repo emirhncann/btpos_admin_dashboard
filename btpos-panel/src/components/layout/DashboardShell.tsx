@@ -63,6 +63,11 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: "/dashboard/updates",
+    label: "Kasaları Güncelle",
+    icon: "☁",
+  },
+  {
     href: "/dashboard/pos-settings",
     label: "POS Ayarları",
     icon: (
