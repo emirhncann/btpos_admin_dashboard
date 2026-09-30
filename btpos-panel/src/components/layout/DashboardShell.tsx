@@ -65,7 +65,7 @@ const NAV_ITEMS: NavItem[] = [
   {
     href: "/dashboard/updates",
     label: "Kasaları Güncelle",
-    icon: "☁",
+    icon: "☁ ",
   },
   {
     href: "/dashboard/pos-settings",
