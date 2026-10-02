@@ -613,9 +613,12 @@ function CashiersPage() {
     setProfileModal({ cashier, settings: null });
     try {
       const data = await apiFetch<Record<string, unknown>>(
-        `/pos-settings/resolve?cashier_id=${cashier.id}&company_id=${companyId}`
+        `/cashier-pos-settings/${cashier.id}`
       );
-      setProfileModal({ cashier, settings: data });
+      const wrapped = data.settings && typeof data.settings === "object"
+        ? data.settings as Record<string, unknown>
+        : data;
+      setProfileModal({ cashier, settings: wrapped });
     } catch {
       setProfileModal({ cashier, settings: null });
     } finally {
@@ -694,11 +697,9 @@ function CashiersPage() {
             ) : profileModal.settings ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {[
-                  { label: "Kaynak",         value: String(profileModal.settings.source ?? "—") },
-                  { label: "Satır İsk.",     value: profileModal.settings.allow_line_discount ? `Açık (max %${profileModal.settings.max_line_discount_pct})` : "Kapalı" },
-                  { label: "Belge İsk.",     value: profileModal.settings.allow_doc_discount  ? `Açık (max %${profileModal.settings.max_doc_discount_pct})`  : "Kapalı" },
-                  { label: "PLU Izgara",     value: `${profileModal.settings.plu_cols ?? 4} × ${profileModal.settings.plu_rows ?? 3}` },
-                  { label: "PLU Modu",       value: profileModal.settings.plu_mode === "cashier" ? "Kasiyer Bazlı" : "Kasa Bazlı" },
+                  { label: "Satır İsk.", value: profileModal.settings.allow_line_discount ? `Açık (max %${profileModal.settings.max_line_discount_pct})` : "Kapalı" },
+                  { label: "Belge İsk.", value: profileModal.settings.allow_doc_discount ? `Açık (max %${profileModal.settings.max_doc_discount_pct})` : "Kapalı" },
+                  { label: "PLU Izgara", value: `${profileModal.settings.plu_cols ?? 4} × ${profileModal.settings.plu_rows ?? 3}` },
                 ].map(row => (
                   <div key={row.label} style={{
                     display: "flex", justifyContent: "space-between",

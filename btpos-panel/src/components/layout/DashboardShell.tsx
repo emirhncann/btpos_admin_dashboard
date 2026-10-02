@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
+import { API_ERROR_EVENT } from "@/services/api";
 
 const BRAND = {
   sidebarBg: "#3A0B05",
@@ -128,6 +129,16 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onError = (event: Event) => {
+      const message = (event as CustomEvent<{ message?: string }>).detail?.message;
+      if (message) setApiError(message);
+    };
+    window.addEventListener(API_ERROR_EVENT, onError);
+    return () => window.removeEventListener(API_ERROR_EVENT, onError);
+  }, []);
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
@@ -230,7 +241,21 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
 
       {/* İçerik */}
       <main className="flex-1 overflow-y-auto">
-        <div className="p-8" style={{ background: "#F8FAFC", minHeight: "100%" }}>{children}</div>
+        <div className="p-8" style={{ background: "#F8FAFC", minHeight: "100%" }}>
+          {apiError && (
+            <div style={{
+              marginBottom: 16, padding: "12px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600,
+              background: "#FEF2F2", border: "1px solid #FECACA", color: "#991B1B",
+              display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center",
+            }}>
+              <span>{apiError}</span>
+              <button type="button" onClick={() => setApiError(null)} style={{
+                border: "none", background: "transparent", color: "#991B1B", cursor: "pointer", fontWeight: 700,
+              }}>Kapat</button>
+            </div>
+          )}
+          {children}
+        </div>
       </main>
     </div>
   );

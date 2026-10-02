@@ -27,35 +27,84 @@ export interface LoginResponse {
   message?: string;
 }
 
-/**
- * Tüm korumalı API istekleri için temel fonksiyon.
- * - Authorization header'ını otomatik ekler.
- * - 401 gelirse oturumu kapatır ve /login'e yönlendirir.
- */
-export const apiRequest = async <T = unknown>(
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export const API_ERROR_EVENT = "btpos-api-error";
+
+/** 4xx/5xx mesajını tüm yönetici sayfalarının görebileceği şeride yazar. */
+export function reportApiError(message: string, status = 0) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(API_ERROR_EVENT, { detail: { message, status } }));
+}
+
+function errorMessage(body: unknown, status: number): string {
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const message = (body as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  return `İstek başarısız (${status}).`;
+}
+
+function visibleError(message: string, method?: string): string {
+  const verb = (method ?? "GET").toUpperCase();
+  if (verb === "GET" || verb === "HEAD") return message;
+  return message.startsWith("Kaydedilemedi:") ? message : `Kaydedilemedi: ${message}`;
+}
+
+async function readJson(
   endpoint: string,
-  options: RequestInit = {}
-): Promise<ApiResponse<T>> => {
+  options: RequestInit
+): Promise<{ ok: boolean; status: number; body: unknown }> {
   const token =
     typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
-
   const headers: HeadersInit = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(options.headers as Record<string, string>),
   };
+  const response = await fetch(`${API_URL}${endpoint}`, { ...options, headers });
+  const text = await response.text();
+  let body: unknown = {};
+  if (text.trim()) {
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      body = { message: text };
+    }
+  }
+  return { ok: response.ok, status: response.status, body };
+}
 
-  const response = await fetch(`${API_URL}${endpoint}`, {
-    ...options,
-    headers,
-  });
+/**
+ * Tüm korumalı API istekleri için temel fonksiyon.
+ * - Authorization header'ını otomatik ekler.
+ * - 401 gelirse oturumu kapatır ve /login'e yönlendirir.
+ * - 4xx/5xx cevabı ekranda gösterilir.
+ */
+export const apiRequest = async <T = unknown>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<ApiResponse<T>> => {
+  const { ok, status, body } = await readJson(endpoint, options);
 
-  if (response.status === 401) {
+  if (status === 401) {
     triggerForceLogout();
     return { message: "Oturum süresi doldu." };
   }
 
-  return response.json();
+  if (!ok) {
+    reportApiError(visibleError(errorMessage(body, status), options.method), status);
+  }
+
+  return (body ?? {}) as ApiResponse<T>;
 };
 
 /** Oturumdaki kullanıcının company_id değeri */
@@ -90,8 +139,24 @@ export async function apiFetch<T = unknown>(
   options: RequestInit = {}
 ): Promise<T> {
   const resolved = resolveCompanyEndpoint(endpoint);
-  const res = await apiRequest<T>(resolved, options);
-  return (((res as { data?: unknown }).data ?? res) as unknown) as T;
+  const { ok, status, body } = await readJson(resolved, options);
+
+  if (status === 401) {
+    triggerForceLogout();
+    throw new ApiError("Oturum süresi doldu.", 401);
+  }
+
+  if (!ok) {
+    const message = visibleError(errorMessage(body, status), options.method);
+    reportApiError(message, status);
+    throw new ApiError(message, status);
+  }
+
+  if (body && typeof body === "object" && !Array.isArray(body) && "data" in body) {
+    const data = (body as { data?: unknown }).data;
+    if (data !== undefined) return data as T;
+  }
+  return body as T;
 }
 
 // ─── Logo İşbaşı API Kuralları ────────────────────────────────────────────────

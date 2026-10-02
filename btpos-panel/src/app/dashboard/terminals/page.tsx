@@ -9,7 +9,9 @@ import {
   sendCommand,
   getPosCommandHistory,
 } from "@/services/api";
-import { USER_KEY } from "@/context/AuthContext";
+import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
 const CMD_LABELS: Record<string, string> = {
   sync_all:             "Tüm Güncelleme",
@@ -259,6 +261,7 @@ function TerminalsPage() {
   const [showEdit, setShowEdit]       = useState(false);
   const [terminal, setTerminal]       = useState<EditableTerminal | null>(null);
   const [savingEdit, setSavingEdit]   = useState(false);
+  const [numberError, setNumberError] = useState<string | null>(null);
 
   const loadTemplates = useCallback(async () => {
     if (!companyId) return;
@@ -389,11 +392,12 @@ function TerminalsPage() {
   };
 
   const openEditModal = (t: Terminal) => {
+    setNumberError(null);
     setTerminal({
       id:              t.id,
       terminal_name:   t.terminal_name,
       workplace_id:    t.workplace_id,
-      terminal_number: t.terminal_number,
+      terminal_number: t.terminal_number ?? "",
     });
     setShowEdit(true);
   };
@@ -401,6 +405,7 @@ function TerminalsPage() {
   const closeEditModal = () => {
     setShowEdit(false);
     setTerminal(null);
+    setNumberError(null);
   };
 
   function updTerminal<K extends keyof EditableTerminal>(key: K, value: EditableTerminal[K]) {
@@ -408,25 +413,43 @@ function TerminalsPage() {
   }
 
   async function saveTerminal() {
-    if (!terminal) return;
+    if (!terminal || !companyId) return;
+    const number = terminal.terminal_number?.trim() ?? "";
+    if (!number || !terminal.terminal_name.trim()) return;
     setSavingEdit(true);
+    setNumberError(null);
     try {
-      await apiRequest(`/terminals/${terminal.id}`, {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const response = await fetch(`${API_URL}/terminals/${companyId}/${terminal.id}`, {
         method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
-          terminal_name:   terminal.terminal_name,
-          workplace_id:    terminal.workplace_id ?? null,
-          terminal_number: terminal.terminal_number?.trim() || null,
+          terminal_name: terminal.terminal_name,
+          workplace_id: terminal.workplace_id ?? null,
+          terminal_number: number,
         }),
       });
+      const data = await response.json().catch(() => ({} as { message?: string }));
+      if (response.status === 409) {
+        setNumberError("Bu kasa numarası başka bir kasada kullanılıyor");
+        return;
+      }
+      if (!response.ok || data.success === false) {
+        setToast({ ok: false, text: data.message || "Güncelleme başarısız." });
+        setTimeout(() => setToast(null), 3500);
+        return;
+      }
       setToast({ ok: true, text: "Kasa bilgileri güncellendi." });
       closeEditModal();
       void loadTerminals();
     } catch {
       setToast({ ok: false, text: "Güncelleme başarısız." });
+      setTimeout(() => setToast(null), 3500);
     } finally {
       setSavingEdit(false);
-      setTimeout(() => setToast(null), 3500);
     }
   }
 
@@ -586,14 +609,21 @@ function TerminalsPage() {
               </div>
 
               <div>
-                <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>Kasa Numarası</div>
+                <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>Kasa No *</div>
                 <input
                   value={terminal.terminal_number ?? ""}
-                  onChange={(e) => updTerminal("terminal_number", e.target.value)}
-                  placeholder="Örn: 01, K1"
+                  onChange={(e) => {
+                    setNumberError(null);
+                    updTerminal("terminal_number", e.target.value);
+                  }}
+                  placeholder="Örn: 003"
+                  required
                   className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-800
                     focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
+                {numberError && (
+                  <div style={{ marginTop: 6, fontSize: 12, color: "#DC2626" }}>{numberError}</div>
+                )}
               </div>
             </div>
             <div className="flex justify-end gap-2 px-5 py-4 border-t border-gray-100 bg-gray-50">
@@ -607,7 +637,7 @@ function TerminalsPage() {
               <button
                 type="button"
                 onClick={() => void saveTerminal()}
-                disabled={savingEdit || !terminal.terminal_name.trim()}
+                disabled={savingEdit || !terminal.terminal_name.trim() || !terminal.terminal_number?.trim()}
                 className="px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-500
                   disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -1116,7 +1146,11 @@ function TerminalsPage() {
                   className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${t.is_installed ? "bg-emerald-500" : "bg-gray-300"}`}
                 />
                 <div className="min-w-0">
-                  <p className="text-sm font-semibold text-gray-900">{t.terminal_name}</p>
+                  <p className="text-sm font-semibold text-gray-900">
+                    {t.terminal_number && !t.terminal_name.includes(t.terminal_number)
+                      ? `${t.terminal_name} · ${t.terminal_number}`
+                      : t.terminal_name}
+                  </p>
                   <p className="text-xs text-gray-500 mt-0.5">
                     {t.workplaces?.name && (
                       <span className="mr-2">📍 {t.workplaces.name}</span>
