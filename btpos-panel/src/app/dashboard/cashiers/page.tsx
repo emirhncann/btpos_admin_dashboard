@@ -177,7 +177,7 @@ function AddCashierModal({
         ? "Sadece rakam, 1–10 hane olmalıdır."
         : "Kasiyer kodu zorunludur.";
     }
-    if (form.password.length < 4) errs.password = "En az 4 karakter giriniz.";
+    if (form.password.length < 1) errs.password = "Şifre giriniz.";
     setFieldErrors(errs);
     return Object.keys(errs).length === 0;
   };
@@ -375,7 +375,7 @@ function AddCashierModal({
                 type={showPw ? "text" : "password"}
                 value={form.password}
                 onChange={(e) => set("password")(e.target.value)}
-                placeholder="En az 4 karakter"
+                placeholder="Şifre"
                 className={`w-full px-3 py-2.5 pr-10 text-sm border rounded-lg text-gray-800 placeholder-gray-400
                   bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all
                   ${fieldErrors.password ? "border-red-300" : "border-gray-200"}`}
