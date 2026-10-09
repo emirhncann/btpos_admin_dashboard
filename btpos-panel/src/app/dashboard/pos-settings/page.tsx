@@ -1,12 +1,38 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { withAuth } from "@/components/withAuth";
 import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
 import { VersionHint, fetchAvailableReleases, latestRelease } from "@/lib/appRelease";
 import { ApiError, reportApiError, sendCommand } from "@/services/api";
 import { TerminalPaymentAccounts } from "@/components/TerminalPaymentAccounts";
+import {
+  BUTTON_COLOR_KEYS,
+  autoTextColor,
+  buttonColorsPayload,
+  contrastRatio,
+  defaultButtonColors,
+  draftsFromButtons,
+  isThemeButton,
+  normalizeHex,
+  parseButtonColors,
+  resolvedText,
+  type ButtonColorDraft,
+  type ButtonColorKey,
+} from "@/constants/buttonColors";
+import { THEMES, THEME_KEYS, normalizeThemeKey, themeCssVars, type ThemeKey } from "@/constants/themes";
+
+type ThemeId = ThemeKey;
+type ThemeTag = "Sade" | "Renkli" | "Koyu" | "Süslü";
+type ThemeFilter = "Tümü" | ThemeTag;
+
+function themeInFilter(key: ThemeKey, filter: ThemeFilter) {
+  const theme = THEMES[key];
+  if (filter === "Tümü") return true;
+  if (filter === "Koyu") return theme.dark;
+  return theme.tag === filter;
+}
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
@@ -14,7 +40,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 type NodeType = "terminal" | "cashier";
 type Panel =
   | "general" | "invoice" | "payment" | "barcode" | "templates" | "devices"
-  | "sales" | "discount" | "plu" | "print";
+  | "sales" | "discount" | "plu" | "print" | "colors";
 type DuplicateItemAction = "increase_qty" | "add_new";
 type PavoInvoiceType = "e_archive" | "paper";
 type PrintBehaviorMode = "ask" | "default" | "none";
@@ -140,6 +166,7 @@ const CASHIER_TABS: { key: Panel; label: string }[] = [
   { key: "discount", label: "İskonto" },
   { key: "plu", label: "PLU Görünümü" },
   { key: "print", label: "Fiş Davranışları" },
+  { key: "colors", label: "🎨 Tema ve Renkler" },
 ];
 
 function parsePrintBehavior(raw: unknown): Record<PrintBehaviorKey, PrintBehaviorMode> {
@@ -228,6 +255,7 @@ function panelsForError(message: string): Panel[] {
   };
   if (text.includes("default_template_ids") || text.includes("fiş şablon")) add("templates");
   if (text.includes("print_behavior") || text.includes("fiş davranış")) add("print");
+  if (text.includes("button_colors") || text.includes("buton") || text.includes("zemin rengi") || text.includes("yazı rengi")) add("colors");
   if (text.includes("touch_keyboard") || text.includes("customer_display") || text.includes("login_with")) add("general");
   if (text.includes("invoice_type") || text.includes("torba_cari") || text.includes("cari_payment")) add("invoice");
   if (text.includes("enabled_payment_brands")) add("payment");
@@ -712,6 +740,100 @@ function DeviceCard({
   );
 }
 
+const BTN_SLUG: Record<string, string> = {
+  cash: "cash",
+  card: "card",
+  split: "split",
+  other_payment: "other-payment",
+  customer: "customer",
+  price_check: "price-check",
+  menu: "menu",
+  documents: "documents",
+};
+
+const MINI_BUTTONS = ["cash", "card", "split", "other_payment", "menu", "documents"] as const;
+
+function PosSketch({
+  vars,
+  tall,
+  ornament,
+}: {
+  vars: Record<string, string>;
+  tall?: boolean;
+  ornament: string;
+}) {
+  return (
+    <div style={{
+      ...(vars as CSSProperties),
+      height: tall ? 360 : 150,
+      background: "var(--pos-screen-bg)",
+      borderRadius: tall ? 12 : 10,
+      overflow: "hidden",
+      display: "flex",
+      flexDirection: "column",
+      transition: "background-color .2s, color .2s",
+    }}>
+      <div style={{
+        height: tall ? 44 : 28,
+        background: "var(--pos-header-bg)",
+        borderBottom: "2px solid var(--pos-accent-line)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "flex-end",
+        paddingRight: 8,
+        color: "var(--pos-header-text)",
+        fontSize: tall ? 18 : 12,
+        transition: "background-color .2s",
+      }}>
+        <span>{ornament}</span>
+      </div>
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1.15fr .85fr", gap: tall ? 10 : 6, padding: tall ? 12 : 6 }}>
+        <div style={{
+          background: "var(--pos-cart-bg)",
+          color: "var(--pos-text)",
+          borderRadius: 6,
+          padding: tall ? 10 : 5,
+          display: "flex",
+          flexDirection: "column",
+          gap: tall ? 8 : 4,
+          transition: "background-color .2s, color .2s",
+        }}>
+          {tall && <div style={{ fontWeight: 700, fontSize: 13 }}>Sepet</div>}
+          <div style={{ height: tall ? 8 : 4, borderRadius: 99, background: "#CBD5E1", width: "80%" }} />
+          {tall ? (
+            <div style={{
+              background: "var(--pos-discount-bg)", color: "var(--pos-discount-text)",
+              borderLeft: "3px solid var(--pos-discount-bar)", padding: "6px 8px", borderRadius: 4, fontSize: 12,
+            }}>İndirim</div>
+          ) : (
+            <div style={{ height: 4, borderRadius: 99, background: "var(--pos-discount-text)", width: "55%" }} />
+          )}
+          <div style={{ height: tall ? 8 : 4, borderRadius: 99, background: "#CBD5E1", width: "70%" }} />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: tall ? 6 : 3, alignContent: "start" }}>
+          {MINI_BUTTONS.map((key) => {
+            const label = BUTTON_COLOR_KEYS.find((item) => item.key === key)?.label ?? "";
+            return (
+              <span key={key} style={{
+                height: tall ? 36 : 14,
+                borderRadius: 4,
+                background: `var(--pos-btn-${BTN_SLUG[key]}-bg)`,
+                color: `var(--pos-btn-${BTN_SLUG[key]}-text)`,
+                fontSize: 11,
+                fontWeight: 700,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "background-color .2s, color .2s",
+              }}>{tall ? label : ""}</span>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PosSettingsPage() {
   const companyId = getCompanyId();
 
@@ -723,6 +845,17 @@ function PosSettingsPage() {
 
   const [tab,          setTab]          = useState<Panel>("general");
   const [settings,     setSettings]     = useState<Settings>(DEFAULT);
+  const [cashierTheme, setCashierTheme] = useState<ThemeId>("klasik");
+  const [hoverTheme, setHoverTheme] = useState<ThemeId | null>(null);
+  const [themeFilter, setThemeFilter] = useState<"Tümü" | ThemeTag>("Tümü");
+  const [cashierThemes, setCashierThemes] = useState<Record<string, ThemeId>>({});
+  const [buttonColors, setButtonColors] = useState(defaultButtonColors);
+  const [savedLook, setSavedLook] = useState("klasik:{}");
+  const [themePrompt, setThemePrompt] = useState<{ next: ThemeId; count: number } | null>(null);
+  const [showColorApply, setShowColorApply] = useState(false);
+  const [colorTargets, setColorTargets] = useState<string[]>([]);
+  const [includeTheme, setIncludeTheme] = useState(true);
+  const [applyingColors, setApplyingColors] = useState(false);
   const [loading,      setLoading]      = useState(false);
   const [saving,       setSaving]       = useState(false);
   const [result,       setResult]       = useState<{ ok: boolean; text: string } | null>(null);
@@ -796,6 +929,26 @@ function PosSettingsPage() {
   }, [companyId]);
 
   useEffect(() => { void loadAll(); }, [loadAll]);
+
+  useEffect(() => {
+    if (cashiers.length === 0) return;
+    let cancel = false;
+    void Promise.all(cashiers.map(async (c) => {
+      try {
+        const res = await fetch(`${API_URL}/cashier-pos-settings/${c.id}`, { headers: authHeaders() });
+        if (!res.ok) return [c.id, "klasik" as ThemeId] as const;
+        const body: unknown = await res.json();
+        const row = asRecord(body) ?? {};
+        const nested = asRecord(row.settings) ?? asRecord(row.data) ?? row;
+        return [c.id, normalizeThemeKey(nested.theme ?? row.theme)] as const;
+      } catch {
+        return [c.id, "klasik" as ThemeId] as const;
+      }
+    })).then((pairs) => {
+      if (!cancel) setCashierThemes(Object.fromEntries(pairs));
+    });
+    return () => { cancel = true; };
+  }, [cashiers]);
 
   useEffect(() => {
     if (!result?.ok) return;
@@ -1045,6 +1198,23 @@ function PosSettingsPage() {
       cariPaymentUsePavo: Boolean(d.cari_payment_use_pavo ?? false),
       printBehavior: parsePrintBehavior(d.print_behavior),
     });
+    if (selectedNode?.type === "cashier") {
+      const theme = normalizeThemeKey(d.theme);
+      rememberLook(theme, parseButtonColors(d.button_colors, THEMES[theme].buttons));
+    }
+  }
+
+  function lookKey(theme: ThemeId, next: Record<ButtonColorKey, ButtonColorDraft>) {
+    return `${theme}:${JSON.stringify(buttonColorsPayload(next, THEMES[theme].buttons))}`;
+  }
+
+  function rememberLook(theme: ThemeId, next: Record<ButtonColorKey, ButtonColorDraft>) {
+    setCashierTheme(theme);
+    setButtonColors(next);
+    setSavedLook(lookKey(theme, next));
+    if (selectedNode?.type === "cashier") {
+      setCashierThemes((prev) => ({ ...prev, [selectedNode.id]: theme }));
+    }
   }
 
   function terminalPayload(nodeId: string): Record<string, unknown> {
@@ -1080,6 +1250,8 @@ function PosSettingsPage() {
       show_code: settings.showCode,
       show_barcode: settings.showBarcode,
       print_behavior: settings.printBehavior,
+      theme: cashierTheme,
+      button_colors: buttonColorsPayload(buttonColors, THEMES[cashierTheme].buttons),
     };
   }
 
@@ -1170,12 +1342,17 @@ function PosSettingsPage() {
         cariPaymentUsePavo: Boolean(d.cari_payment_use_pavo ?? false),
         printBehavior: parsePrintBehavior(d.print_behavior),
       });
+      if (node.type === "cashier") {
+        const theme = normalizeThemeKey(d.theme);
+        rememberLook(theme, parseButtonColors(d.button_colors, THEMES[theme].buttons));
+      }
     } catch {
       if (seq !== loadSeq.current) return;
       setSettings(DEFAULT);
       setTorbaCariId("");
       setTorbaCariName("");
       setDevtools(CLOSED_DEVTOOLS);
+      rememberLook("klasik", defaultButtonColors());
       setResult({ ok: false, text: "Ayarlar yüklenemedi." });
     } finally {
       if (seq !== loadSeq.current) return;
@@ -1368,6 +1545,97 @@ function PosSettingsPage() {
       setDevtoolsNote({ ok: false, text: "Sunucuya ulaşılamadı." });
     } finally {
       setDevtoolsBusy(false);
+    }
+  }
+
+  function patchButtonColor(key: ButtonColorKey, patch: Partial<ButtonColorDraft>) {
+    setButtonColors((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+  }
+
+  function colorsLookDirty() {
+    return lookKey(cashierTheme, buttonColors) !== savedLook;
+  }
+
+  function chooseTheme(next: ThemeId) {
+    if (next === cashierTheme) return;
+    const custom = Object.keys(buttonColorsPayload(buttonColors, THEMES[cashierTheme].buttons));
+    if (custom.length === 0) {
+      setCashierTheme(next);
+      setButtonColors(draftsFromButtons(THEMES[next].buttons));
+      return;
+    }
+    setThemePrompt({ next, count: custom.length });
+  }
+
+  function onGalleryKey(event: { key: string; preventDefault: () => void }) {
+    const visible = THEME_KEYS.filter((key) => themeInFilter(key, themeFilter));
+    const focused = typeof document !== "undefined" && document.activeElement?.id.startsWith("theme-card-")
+      ? document.activeElement.id.slice("theme-card-".length)
+      : cashierTheme;
+    const current = (THEME_KEYS as readonly string[]).includes(focused) ? focused as ThemeId : cashierTheme;
+    const index = Math.max(0, visible.indexOf(current));
+    let next = index;
+    if (event.key === "ArrowRight") next = Math.min(visible.length - 1, index + 1);
+    else if (event.key === "ArrowLeft") next = Math.max(0, index - 1);
+    else if (event.key === "ArrowDown") next = Math.min(visible.length - 1, index + 3);
+    else if (event.key === "ArrowUp") next = Math.max(0, index - 3);
+    else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      chooseTheme(current);
+      return;
+    } else return;
+    event.preventDefault();
+    const id = visible[next];
+    if (!id) return;
+    document.getElementById(`theme-card-${id}`)?.focus();
+    chooseTheme(id);
+  }
+
+  function confirmTheme(keep: boolean) {
+    if (!themePrompt) return;
+    const next = themePrompt.next;
+    const fresh = draftsFromButtons(THEMES[next].buttons);
+    if (keep) {
+      const custom = buttonColorsPayload(buttonColors, THEMES[cashierTheme].buttons);
+      for (const key of Object.keys(custom) as ButtonColorKey[]) {
+        fresh[key] = buttonColors[key];
+      }
+    }
+    setCashierTheme(next);
+    setButtonColors(fresh);
+    setThemePrompt(null);
+  }
+
+  async function applyColorsToCashiers() {
+    if (!selectedNode || selectedNode.type !== "cashier" || colorTargets.length === 0 || applyingColors) return;
+    if (colorsLookDirty()) {
+      setShowColorApply(false);
+      setResult({ ok: false, text: "Önce kaydedin" });
+      return;
+    }
+    setApplyingColors(true);
+    try {
+      const saved = await apiFetch<{ updated?: number }>(
+        `/cashier-pos-settings/${selectedNode.id}/apply-button-colors`,
+        {
+          method: "POST",
+          body: JSON.stringify({ target_cashier_ids: colorTargets, include_theme: includeTheme }),
+        },
+      );
+      const count = typeof saved.updated === "number" ? saved.updated : colorTargets.length;
+      const lists = await Promise.all(colorTargets.map((id) => cashierTerminalIds(id)));
+      const terminalIds = [...new Set(lists.flat())];
+      setShowColorApply(false);
+      setColorTargets([]);
+      setSendPrompt({
+        text: `${count} kasiyere uygulandı. Kasalara gönderilsin mi?`,
+        terminalIds,
+      });
+    } catch (error) {
+      const text = error instanceof ApiError ? error.message : "Kaydedilemedi: Renkler uygulanamadı.";
+      setResult({ ok: false, text });
+    } finally {
+      setApplyingColors(false);
     }
   }
 
@@ -1621,6 +1889,17 @@ function PosSettingsPage() {
 
   return (
     <div style={{display:"flex",flexDirection:"column",height:"calc(100vh - 4rem)",margin:"-32px",overflow:"hidden"}}>
+      <style>{`
+        .theme-card { transition: transform 150ms ease, box-shadow 150ms ease; }
+        .theme-card:hover { transform: translateY(-4px); box-shadow: 0 14px 28px rgba(15,23,42,.16); }
+        @keyframes theme-sparkle { 0%, 100% { opacity: .6 } 50% { opacity: 1 } }
+        .theme-sparkle { position: absolute; top: 8px; right: 8px; width: 18px; height: 18px; border-radius: 99px;
+          background: radial-gradient(circle, #fff 0 30%, transparent 70%); animation: theme-sparkle 2.5s ease-in-out infinite; pointer-events: none; }
+        @media (prefers-reduced-motion: reduce) {
+          .theme-card, .theme-card:hover { transition: none; transform: none; }
+          .theme-sparkle { animation: none; opacity: .8; }
+        }
+      `}</style>
 
       <input ref={fileRef} type="file" accept=".json" style={{display:"none"}}
         onChange={e=>{const f=e.target.files?.[0];if(f) void importSettings(f);}} />
@@ -1948,8 +2227,12 @@ function PosSettingsPage() {
                     background:act?"#ECFDF5":"white",
                     borderLeft:`3px solid ${act?"#10B981":"transparent"}`,
                     borderBottom:"1px solid #F9FAFB"}}>
-                  <span style={{fontSize:12,flex:1,color:act?"#065F46":"#374151",fontWeight:act?600:400}}>
-                    {c.full_name} ({c.cashier_code})
+                  <span style={{fontSize:12,flex:1,color:act?"#065F46":"#374151",fontWeight:act?600:400,
+                    display:"flex",alignItems:"center",gap:6}}>
+                    {cashierThemes[c.id] && cashierThemes[c.id] !== "klasik" && (
+                      <span style={{ fontSize: 13 }}>{THEMES[cashierThemes[c.id]].emoji}</span>
+                    )}
+                    <span>{c.full_name} ({c.cashier_code})</span>
                   </span>
                 </div>
               );
@@ -2039,6 +2322,9 @@ function PosSettingsPage() {
                         boxShadow:tab===item.key?"0 1px 3px rgba(0,0,0,0.1)":"none"}}>
                       <span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6}}>
                         {item.label}
+                        {item.key === "colors" && selectedNode.type === "cashier" && colorsLookDirty() && (
+                          <span style={{ color: "#1565C0", fontSize: 10 }}>●</span>
+                        )}
                         {errorTabs.includes(item.key) && (
                           <span style={{width:8,height:8,borderRadius:99,background:"#DC2626",display:"inline-block"}} />
                         )}
@@ -2324,6 +2610,216 @@ function PosSettingsPage() {
                       </div>
                     ))}
                   </div>
+                  )}
+
+                  {tab === "colors" && selectedNode?.type === "cashier" && (
+                    <div style={{ padding: "16px 0" }}>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: "#111827", marginBottom: 10 }}>Kasiyerin teması</div>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+                        {(["Tümü", "Sade", "Renkli", "Koyu", "Süslü"] as const).map((chip) => {
+                          const on = themeFilter === chip;
+                          return (
+                            <button key={chip} type="button" onClick={() => setThemeFilter(chip)}
+                              style={{
+                                border: "none", borderRadius: 99, padding: "6px 12px", cursor: "pointer",
+                                fontSize: 13, fontWeight: 700,
+                                background: on ? "#1565C0" : "#F3F4F6",
+                                color: on ? "white" : "#374151",
+                              }}>
+                              {chip === "Süslü" ? "Süslü ✨" : chip}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div role="radiogroup" aria-label="Kasiyerin teması" onKeyDown={onGalleryKey}
+                        style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16, marginBottom: 18 }}>
+                        {(() => {
+                          const visible = THEME_KEYS.filter((key) => themeInFilter(key, themeFilter));
+                          const tabKey = visible.includes(cashierTheme) ? cashierTheme : visible[0];
+                          return visible.map((key) => {
+                          const theme = THEMES[key];
+                          const selected = key === cashierTheme;
+                          const vars = themeCssVars(key);
+                          return (
+                            <button key={key} id={`theme-card-${key}`} type="button" role="radio"
+                              aria-checked={selected} tabIndex={key === tabKey ? 0 : -1}
+                              className="theme-card"
+                              onMouseEnter={() => setHoverTheme(key)}
+                              onMouseLeave={() => setHoverTheme(null)}
+                              onClick={() => chooseTheme(key)}
+                              style={{
+                                position: "relative", textAlign: "left", cursor: "pointer", background: "white",
+                                borderRadius: 12, padding: 0, overflow: "hidden", minHeight: 230,
+                                border: selected ? `3px solid ${theme.tokens.primary}` : "1px solid #E5E7EB",
+                                boxShadow: selected ? `0 0 0 6px ${theme.tokens.primary}33` : "0 1px 2px rgba(0,0,0,.04)",
+                              }}>
+                              {theme.experimental && (
+                                <span style={{
+                                  position: "absolute", top: 8, right: 8, zIndex: 2,
+                                  background: "#7C3AED", color: "#FFFFFF", fontSize: 10, fontWeight: 700,
+                                  borderRadius: 99, padding: "3px 6px", lineHeight: 1.2,
+                                }}>Deneysel</span>
+                              )}
+                              {theme.tag === "Süslü" && (
+                                <span className="theme-sparkle" style={theme.experimental ? { right: 78 } : undefined} />
+                              )}
+                              <PosSketch vars={vars} ornament={theme.decor?.ornament ?? ""} />
+                              <div style={{ padding: "8px 10px 28px" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <span style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>
+                                    {theme.emoji} {theme.label}
+                                  </span>
+                                  {theme.tag === "Süslü" && <span style={{ fontSize: 12 }}>✨</span>}
+                                  <span style={{
+                                    marginLeft: "auto", fontSize: 11, fontWeight: 700, borderRadius: 99,
+                                    padding: "2px 8px", background: theme.tag === "Koyu" ? "#111827" : "#F3F4F6",
+                                    color: theme.tag === "Koyu" ? "white" : "#374151",
+                                  }}>
+                                    {theme.tag === "Süslü" ? "Süslü ✨" : theme.tag}
+                                  </span>
+                                </div>
+                                <div style={{
+                                  marginTop: 4, fontSize: 13, color: "#6B7280", lineHeight: 1.35,
+                                  display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+                                }}>{theme.description}</div>
+                                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                                  {[theme.tokens.bg, theme.tokens.surface, theme.tokens.primary, theme.buttons.cash.bg, theme.buttons.card.bg, theme.buttons.split.bg].map((color, i) => (
+                                    <span key={i} style={{ width: 12, height: 12, borderRadius: 99, background: color, border: "1px solid rgba(0,0,0,.08)" }} />
+                                  ))}
+                                </div>
+                              </div>
+                              {selected && (
+                                <span style={{
+                                  position: "absolute", right: 0, bottom: 0, background: theme.tokens.primary,
+                                  color: theme.tokens.primaryText, fontSize: 11, fontWeight: 700, padding: "3px 8px",
+                                  borderTopLeftRadius: 8,
+                                }}>✓ Seçili</span>
+                              )}
+                            </button>
+                          );
+                          });
+                        })()}
+                      </div>
+                      <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 8 }}>
+                        Müşteri ekranı, fiş ve PLU tuşları temadan etkilenmez.
+                      </div>
+                      {(() => {
+                        const previewKey = hoverTheme ?? cashierTheme;
+                        const vars = themeCssVars(
+                          previewKey,
+                          previewKey === cashierTheme
+                            ? buttonColorsPayload(buttonColors, THEMES[cashierTheme].buttons)
+                            : undefined,
+                        );
+                        return (
+                          <div style={{ marginBottom: 22 }}>
+                            <PosSketch vars={vars} ornament={THEMES[previewKey].decor?.ornament ?? ""} tall />
+                          </div>
+                        );
+                      })()}
+
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#111827", marginBottom: 4 }}>Buton renkleri</div>
+                      <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 10 }}>
+                        Boş bırakılan tema rengini kullanır.
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "140px 1fr 1.4fr 88px 36px",
+                        gap: 8, alignItems: "center", fontSize: 12, color: "#6B7280", marginBottom: 8 }}>
+                        <span>Buton</span>
+                        <span>Zemin</span>
+                        <span>Yazı</span>
+                        <span />
+                        <span />
+                      </div>
+                      {BUTTON_COLOR_KEYS.map(({ key, label }) => {
+                        const draft = buttonColors[key];
+                        const text = resolvedText(draft);
+                        const lowContrast = contrastRatio(draft.bg, text) < 3;
+                        const stock = isThemeButton(key, draft, THEMES[cashierTheme].buttons);
+                        const themeBg = THEMES[cashierTheme].buttons[key].bg;
+                        return (
+                          <div key={key} style={{ display: "grid", gridTemplateColumns: "140px 1fr 1.4fr 88px 36px",
+                            gap: 8, alignItems: "center", padding: "10px 0", borderBottom: "1px solid #F3F4F6" }}>
+                            <div>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: "#111827" }}>{label}</div>
+                              <div style={{ fontSize: 11, color: stock ? "#9CA3AF" : "#1565C0", marginTop: 2 }}>
+                                {stock ? "tema" : "özel"}
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <input type="color" value={(normalizeHex(draft.bg) ?? "#000000").toLowerCase()} aria-label={`${label} zemin`}
+                                onChange={(e) => patchButtonColor(key, { bg: e.target.value.toUpperCase() })}
+                                style={{ width: 36, height: 28, padding: 0, border: "1px solid #E5E7EB", background: "white" }} />
+                              <input value={draft.bg}
+                                onChange={(e) => {
+                                  const next = normalizeHex(e.target.value);
+                                  patchButtonColor(key, { bg: next ?? e.target.value });
+                                }}
+                                onBlur={() => {
+                                  const next = normalizeHex(draft.bg);
+                                  patchButtonColor(key, { bg: next ?? themeBg });
+                                }}
+                                style={{ width: 92, border: "1px solid #E5E7EB", borderRadius: 6, padding: "6px 8px", fontSize: 12 }} />
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                              <label style={{ fontSize: 12, color: "#374151", display: "inline-flex", gap: 4, alignItems: "center" }}>
+                                <input type="radio" name={`text-${key}`} checked={draft.textMode === "auto"}
+                                  onChange={() => patchButtonColor(key, { textMode: "auto" })} />
+                                Otomatik
+                              </label>
+                              <label style={{ fontSize: 12, color: "#374151", display: "inline-flex", gap: 4, alignItems: "center" }}>
+                                <input type="radio" name={`text-${key}`} checked={draft.textMode === "custom"}
+                                  onChange={() => patchButtonColor(key, { textMode: "custom", text: autoTextColor(draft.bg) })} />
+                                Özel
+                              </label>
+                              {draft.textMode === "custom" && (
+                                <>
+                                  <input type="color" value={normalizeHex(draft.text) ?? "#FFFFFF"} aria-label={`${label} yazı`}
+                                    onChange={(e) => patchButtonColor(key, { text: e.target.value.toUpperCase() })}
+                                    style={{ width: 36, height: 28, padding: 0, border: "1px solid #E5E7EB", background: "white" }} />
+                                  <input value={draft.text}
+                                    onChange={(e) => {
+                                      const next = normalizeHex(e.target.value);
+                                      patchButtonColor(key, { text: next ?? e.target.value });
+                                    }}
+                                    style={{ width: 92, border: "1px solid #E5E7EB", borderRadius: 6, padding: "6px 8px", fontSize: 12 }} />
+                                </>
+                              )}
+                            </div>
+                            <div>
+                              {lowContrast && (
+                                <span style={{ fontSize: 11, color: "#92400E", background: "#FEF3C7",
+                                  borderRadius: 6, padding: "3px 6px" }}>Yazı zor okunabilir</span>
+                              )}
+                            </div>
+                            <button type="button" title="Tema rengine döndür"
+                              onClick={() => patchButtonColor(key, draftsFromButtons(THEMES[cashierTheme].buttons)[key])}
+                              style={{ border: "1px solid #E5E7EB", background: "white", borderRadius: 6,
+                                width: 32, height: 32, cursor: "pointer" }}>↺</button>
+                          </div>
+                        );
+                      })}
+
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 18 }}>
+                        <button type="button" onClick={() => setButtonColors(draftsFromButtons(THEMES[cashierTheme].buttons))}
+                          style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E7EB",
+                            background: "white", cursor: "pointer", fontSize: 13 }}>
+                          Tümünü varsayılana döndür
+                        </button>
+                        <button type="button" onClick={() => {
+                          if (colorsLookDirty()) {
+                            setResult({ ok: false, text: "Önce kaydedin" });
+                            return;
+                          }
+                          setColorTargets([]);
+                          setIncludeTheme(true);
+                          setShowColorApply(true);
+                        }}
+                          style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #C7D7FD",
+                            background: "#EFF6FF", color: "#1D4ED8", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+                          Diğer kasiyerlere uygula…
+                        </button>
+                      </div>
+                    </div>
                   )}
 
                   {tab==="general" && selectedNode?.type === "terminal" && (
@@ -2874,6 +3370,79 @@ function PosSettingsPage() {
           )}
         </div>
       </div>
+
+      {themePrompt && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 10000, background: "rgba(0,0,0,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div style={{ background: "white", borderRadius: 14, padding: 24, width: 440, maxWidth: "100%" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>
+              Bu kasiyerin {themePrompt.count} özel buton rengi var. Yeni temada ne olsun?
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18, flexWrap: "wrap" }}>
+              <button type="button" onClick={() => confirmTheme(true)} style={{
+                padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E7EB", background: "white", cursor: "pointer",
+              }}>Özel renkleri koru</button>
+              <button type="button" onClick={() => confirmTheme(false)} style={{
+                padding: "8px 12px", borderRadius: 8, border: "none", background: "#1565C0", color: "white",
+                fontWeight: 700, cursor: "pointer",
+              }}>Temanın renklerini kullan</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showColorApply && selectedNode?.type === "cashier" && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 10000, background: "rgba(0,0,0,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div style={{ background: "white", borderRadius: 14, padding: 24, width: 420, maxWidth: "100%" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Diğer kasiyerlere uygula</div>
+            <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 12 }}>
+              Kayıtlı buton renkleri seçilen kasiyerlere yazılır.
+            </div>
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginBottom: 12 }}>
+              <input type="checkbox" checked={includeTheme} onChange={(e) => setIncludeTheme(e.target.checked)} />
+              Temayı da uygula
+            </label>
+            {cashiers.filter((c) => c.id !== selectedNode.id).length === 0 ? (
+              <div style={{ fontSize: 13, color: "#6B7280" }}>Başka kasiyer yok.</div>
+            ) : (
+              <>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+                  <input type="checkbox"
+                    checked={colorTargets.length === cashiers.filter((c) => c.id !== selectedNode.id).length}
+                    onChange={(e) => {
+                      const others = cashiers.filter((c) => c.id !== selectedNode.id).map((c) => c.id);
+                      setColorTargets(e.target.checked ? others : []);
+                    }} />
+                  Tümünü seç
+                </label>
+                <div style={{ maxHeight: 280, overflowY: "auto", border: "1px solid #E5E7EB", borderRadius: 8 }}>
+                  {cashiers.filter((c) => c.id !== selectedNode.id).map((c) => (
+                    <label key={c.id} style={{ display: "flex", gap: 8, alignItems: "center",
+                      padding: "8px 12px", borderBottom: "1px solid #F3F4F6", fontSize: 13 }}>
+                      <input type="checkbox" checked={colorTargets.includes(c.id)}
+                        onChange={() => setColorTargets((prev) =>
+                          prev.includes(c.id) ? prev.filter((id) => id !== c.id) : [...prev, c.id]
+                        )} />
+                      {c.full_name} ({c.cashier_code})
+                    </label>
+                  ))}
+                </div>
+              </>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
+              <button type="button" onClick={() => setShowColorApply(false)} style={{
+                padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E7EB", background: "white", cursor: "pointer",
+              }}>Vazgeç</button>
+              <button type="button" disabled={applyingColors || colorTargets.length === 0}
+                onClick={() => void applyColorsToCashiers()} style={{
+                  padding: "8px 12px", borderRadius: 8, border: "none", background: "#1565C0", color: "white",
+                  fontWeight: 700, cursor: "pointer", opacity: colorTargets.length === 0 ? 0.5 : 1,
+                }}>{applyingColors ? "..." : "Uygula"}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showUnlock && (
         <div style={{ position: "fixed", inset: 0, zIndex: 10000, background: "rgba(0,0,0,0.4)",
