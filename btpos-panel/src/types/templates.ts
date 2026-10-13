@@ -7,32 +7,19 @@ export type TriggerType =
   | "etiket"
   | "manuel";
 
-export type TemplateType = "thermal" | "pdf";
+export type TemplateType = "thermal" | "pdf" | "label";
 
-export interface TemplateBlock {
-  id: string;
-  type:
-    | "text"
-    | "variable"
-    | "divider"
-    | "space"
-    | "logo"
-    | "barcode"
-    | "image"
-    | "table";
-  value?: string;
-  key?: string;
-  label?: string;
-  align?: "left" | "center" | "right";
-  bold?: boolean;
-  fontSize?: number;
-  char?: string;
-  columns?: { key: string; label: string; width: number }[];
+export type PdfmeTemplate = {
+  basePdf:
+    | { width: number; height: number; padding: [number, number, number, number] }
+    | string;
+  schemas: unknown[][];
+  pdfmeVersion?: string;
+};
+
+export function isPdfmeTemplate(s: unknown): s is PdfmeTemplate {
+  return !!s && typeof s === "object" && "schemas" in s && "basePdf" in s;
 }
-
-import type { TemplateCustomElement } from "@/lib/templateCustomElements";
-
-export type { TemplateCustomElement };
 
 export interface ReceiptTemplate {
   id?: string;
@@ -42,10 +29,8 @@ export interface ReceiptTemplate {
   template_type: TemplateType;
   paper_width_mm: number;
   paper_height_mm: number | null;
-  /** Termal: TemplateBlock[] — PDF: AnkaReport layout JSON */
-  schema: TemplateBlock[] | Record<string, unknown> | unknown;
-  /** Şablona özel sabit metinler (AnkaReport dataSource) */
-  custom_elements?: TemplateCustomElement[];
+  /** pdfme Template JSON: { basePdf, schemas, pdfmeVersion } */
+  schema: PdfmeTemplate | unknown;
   is_default: boolean;
   is_active?: boolean;
   updated_at?: string;

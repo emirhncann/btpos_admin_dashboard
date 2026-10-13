@@ -1,0 +1,325 @@
+import { TOKEN_KEY, USER_KEY, triggerForceLogout } from "@/context/AuthContext";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
+
+export interface ApiResponse<T = unknown> {
+  success?: boolean;
+  message?: string;
+  data?: T;
+}
+
+export interface UserInfo {
+  id: number;
+  name: string;
+  email: string;
+  role: string;
+  company_id?: number | string;
+}
+
+export interface LoginPayload {
+  email: string;
+  password: string;
+}
+
+export interface LoginResponse {
+  token: string;
+  user: UserInfo;
+  message?: string;
+}
+
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export const API_ERROR_EVENT = "btpos-api-error";
+
+/** 4xx/5xx mesajını tüm yönetici sayfalarının görebileceği şeride yazar. */
+export function reportApiError(message: string, status = 0) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(API_ERROR_EVENT, { detail: { message, status } }));
+}
+
+function errorMessage(body: unknown, status: number): string {
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const message = (body as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  return `İstek başarısız (${status}).`;
+}
+
+function visibleError(message: string, method?: string): string {
+  const verb = (method ?? "GET").toUpperCase();
+  if (verb === "GET" || verb === "HEAD") return message;
+  return message.startsWith("Kaydedilemedi:") ? message : `Kaydedilemedi: ${message}`;
+}
+
+async function readJson(
+  endpoint: string,
+  options: RequestInit
+): Promise<{ ok: boolean; status: number; body: unknown }> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const headers: HeadersInit = {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(options.headers as Record<string, string>),
+  };
+  const response = await fetch(`${API_URL}${endpoint}`, { ...options, headers });
+  const text = await response.text();
+  let body: unknown = {};
+  if (text.trim()) {
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      body = { message: text };
+    }
+  }
+  return { ok: response.ok, status: response.status, body };
+}
+
+/**
+ * Tüm korumalı API istekleri için temel fonksiyon.
+ * - Authorization header'ını otomatik ekler.
+ * - 401 gelirse oturumu kapatır ve /login'e yönlendirir.
+ * - 4xx/5xx cevabı ekranda gösterilir.
+ */
+export const apiRequest = async <T = unknown>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<ApiResponse<T>> => {
+  const { ok, status, body } = await readJson(endpoint, options);
+
+  if (status === 401) {
+    triggerForceLogout();
+    return { message: "Oturum süresi doldu." };
+  }
+
+  if (!ok) {
+    reportApiError(visibleError(errorMessage(body, status), options.method), status);
+  }
+
+  return (body ?? {}) as ApiResponse<T>;
+};
+
+/** Oturumdaki kullanıcının company_id değeri */
+export function getCompanyId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    if (!raw) return null;
+    const user = JSON.parse(raw) as { company_id?: number | string };
+    return user?.company_id != null ? String(user.company_id) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `{company_id}` yer tutucusunu gerçek şirket kimliği ile değiştirir */
+export function resolveCompanyEndpoint(
+  endpoint: string,
+  companyId?: string | null
+): string {
+  const cid = companyId ?? getCompanyId();
+  if (!cid) throw new Error("Şirket bilgisi bulunamadı.");
+  return endpoint.replace("{company_id}", cid);
+}
+
+/**
+ * Korumalı API — yanıt gövdesindeki `data` alanını döndürür.
+ * Endpoint içinde `{company_id}` kullanılabilir.
+ */
+export async function apiFetch<T = unknown>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const resolved = resolveCompanyEndpoint(endpoint);
+  const { ok, status, body } = await readJson(resolved, options);
+
+  if (status === 401) {
+    triggerForceLogout();
+    throw new ApiError("Oturum süresi doldu.", 401);
+  }
+
+  if (!ok) {
+    const message = visibleError(errorMessage(body, status), options.method);
+    reportApiError(message, status);
+    throw new ApiError(message, status);
+  }
+
+  if (body && typeof body === "object" && !Array.isArray(body) && "data" in body) {
+    const data = (body as { data?: unknown }).data;
+    if (data !== undefined) return data as T;
+  }
+  return body as T;
+}
+
+// ─── Logo İşbaşı API Kuralları ────────────────────────────────────────────────
+// Swagger'a göre:
+//   - Yeni kayıt: id her zaman 0 gönderilmeli
+//   - Liste sorguları: POST + body'de paging objesi
+//   - Her istekte: apiKey, tenantId, Authorization: Bearer {accessToken}
+
+export const ISBASI_DEFAULT_PAGING = {
+  paging: { currentPage: 1, pageSize: 15 },
+};
+
+export interface IsbasiAuthHeaders {
+  apiKey: string;
+  tenantId: string;
+  accessToken: string;
+}
+
+/**
+ * Logo İşbaşı API'ye istek atar.
+ * Header'lara apiKey, tenantId ve Authorization otomatik eklenir.
+ * Yeni kayıt oluştururken body'deki id alanını 0 olarak bırakın.
+ */
+export const isbasiRequest = async <T = unknown>(
+  baseUrl: string,
+  endpoint: string,
+  auth: IsbasiAuthHeaders,
+  options: RequestInit = {}
+): Promise<T> => {
+  const cleanBase = baseUrl.replace(/\/$/, "");
+
+  const headers: HeadersInit = {
+    "Content-Type": "application/json; charset=utf-8",
+    "apiKey": auth.apiKey,
+    "tenantId": auth.tenantId,
+    "Authorization": `Bearer ${auth.accessToken}`,
+    ...(options.headers as Record<string, string>),
+  };
+
+  const response = await fetch(`${cleanBase}${endpoint}`, {
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(
+      (err as { message?: string }).message ?? `HTTP ${response.status}`
+    );
+  }
+
+  return response.json() as Promise<T>;
+};
+
+// ─── Kasa Yönetimi (POS Commands) ────────────────────────────────────────────
+
+export interface SendCommandPayload {
+  company_id: string;
+  command: string;
+  payload?: Record<string, unknown>;
+  send_to_all: boolean;
+  terminal_ids?: string[];
+  created_by?: string;
+}
+
+export interface CommandTarget {
+  id: string;
+  status: "pending" | "processing" | "done" | "failed";
+  error?: string | null;
+  terminals?: { terminal_name?: string };
+}
+
+export interface CommandRecord {
+  id: string;
+  command: string;
+  send_to_all: boolean;
+  created_at: string;
+  terminal_command_targets?: CommandTarget[];
+}
+
+export interface TerminalSettings {
+  poll_interval_sec?: number;
+  is_locked?: boolean;
+  lock_reason?: string;
+}
+
+export async function sendCommand(
+  payload: SendCommandPayload
+): Promise<{ success: boolean; message?: string; target_count?: number }> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const res = await fetch(`${API_URL}/pos/commands/send`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
+export async function getCommandHistory(
+  companyId: string
+): Promise<CommandRecord[]> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const res = await fetch(`${API_URL}/pos/commands/list/${companyId}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  return res.json();
+}
+
+/** Kasa bazlı veya şirket geneli komut geçmişi (hedef kayıtları) */
+export async function getPosCommandHistory(
+  companyId: string,
+  options?: { terminalId?: string; limit?: number }
+): Promise<unknown> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const limit = options?.limit ?? 50;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (options?.terminalId) params.set("terminal_id", options.terminalId);
+  const res = await fetch(
+    `${API_URL}/pos/commands/history/${companyId}?${params.toString()}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+  );
+  return res.json();
+}
+
+export async function updateTerminalSettings(
+  terminalId: string,
+  settings: TerminalSettings
+): Promise<{ success: boolean; message?: string }> {
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+  const res = await fetch(`${API_URL}/pos/commands/settings/${terminalId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(settings),
+  });
+  return res.json();
+}
+
+/**
+ * Login / Logout işlemleri
+ */
+export const authService = {
+  login: async (payload: LoginPayload): Promise<LoginResponse> => {
+    const response = await fetch(`${API_URL}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message ?? "Giriş başarısız.");
+    }
+
+    return response.json();
+  },
+};

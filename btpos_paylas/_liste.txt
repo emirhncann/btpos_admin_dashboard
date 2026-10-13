@@ -1,0 +1,14 @@
+﻿btpos-panel\src\app\dashboard\pos-settings\page.tsx
+btpos-panel\src\app\dashboard\templates\[id]\AnkaReportDesigner.tsx
+btpos-panel\src\app\dashboard\templates\[id]\page.tsx
+btpos-panel\src\app\dashboard\templates\[id]\TemplateCustomElementsPanel.tsx
+btpos-panel\src\app\dashboard\templates\[id]\TemplateEditorClient.tsx
+btpos-panel\src\app\dashboard\templates\page.tsx
+btpos-panel\src\app\dashboard\terminals\page.tsx
+btpos-panel\src\app\dashboard\page.tsx
+btpos-panel\src\services\api.ts
+btpos-panel\src\types\templates.ts
+btpos-panel\package.json
+php-slim\config\db.php
+php-slim\routes\pos-settings.php
+supabase\migrations\20250521_pos_settings_print_behavior.sql

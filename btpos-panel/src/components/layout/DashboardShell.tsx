@@ -113,6 +113,17 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    href: "/dashboard/store-users",
+    label: "Mağaza Kullanıcıları",
+    icon: (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+          d="M3 9l1-5h16l1 5M3 9h18M3 9v1a3 3 0 006 0V9m0 0v1a3 3 0 006 0V9m0 0v1a3 3 0 006 0V9M5 13v7h14v-7"
+        />
+      </svg>
+    ),
+  },
+  {
     href: "/dashboard/erp-settings",
     label: "ERP Entegrasyon",
     icon: (

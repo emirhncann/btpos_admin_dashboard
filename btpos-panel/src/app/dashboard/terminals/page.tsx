@@ -78,6 +78,7 @@ interface TemplateListItem {
   id: string;
   name: string;
   trigger_type: string;
+  template_type?: string;
 }
 
 const TEMPLATE_TRIGGER_LABELS: Record<string, string> = {
@@ -257,6 +258,7 @@ function TerminalsPage() {
   } | null>(null);
 
   const [templates, setTemplates] = useState<TemplateListItem[]>([]);
+  const tillTemplates = templates.filter((t) => t.template_type !== "label");
 
   const [showEdit, setShowEdit]       = useState(false);
   const [terminal, setTerminal]       = useState<EditableTerminal | null>(null);
@@ -475,7 +477,7 @@ function TerminalsPage() {
 
   const sendCommandToTerminal = async () => {
     if (!selectedTerm || !companyId) return;
-    if (selCmd === "sync_templates" && templates.length === 0) {
+    if (selCmd === "sync_templates" && tillTemplates.length === 0) {
       setToast({ ok: false, text: "Gönderilecek şablon yok." });
       setTimeout(() => setToast(null), 3500);
       return;
@@ -488,12 +490,12 @@ function TerminalsPage() {
           body: JSON.stringify({
             send_to_all: false,
             terminal_ids: [selectedTerm.id],
-            template_ids: templates.map((t) => t.id),
+            template_ids: tillTemplates.map((t) => t.id),
           }),
         });
         setToast({
           ok: true,
-          text: `${templates.length} şablon kasaya gönderildi.`,
+          text: `${tillTemplates.length} şablon kasaya gönderildi.`,
         });
         setShowSendCmd(false);
         void loadTerminals();
@@ -765,7 +767,7 @@ function TerminalsPage() {
                     Tüm şablonlar seçili kasaya senkronize edilir ve kasada SQLite&apos;a
                     kaydedilir.
                   </p>
-                  {templates.length === 0 ? (
+                  {tillTemplates.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-gray-200 px-3 py-4 text-center text-xs text-gray-400">
                       Henüz şablon yok.{" "}
                       <Link href="/dashboard/templates" className="text-[#1565C0] font-medium">
@@ -774,7 +776,7 @@ function TerminalsPage() {
                     </div>
                   ) : (
                     <ul className="max-h-40 overflow-y-auto rounded-lg border border-gray-200 divide-y divide-gray-100">
-                      {templates.map((tmpl) => (
+                      {tillTemplates.map((tmpl) => (
                         <li
                           key={tmpl.id}
                           className="flex items-center justify-between gap-2 px-3 py-2 text-xs bg-gray-50"
@@ -790,7 +792,7 @@ function TerminalsPage() {
                     </ul>
                   )}
                   <p className="text-[11px] text-gray-400">
-                    {templates.length} şablon gönderilecek
+                    {tillTemplates.length} şablon gönderilecek
                   </p>
                 </div>
               )}
@@ -809,7 +811,7 @@ function TerminalsPage() {
                 disabled={
                   sending ||
                   (selCmd === "message" && !msgText.trim()) ||
-                  (selCmd === "sync_templates" && templates.length === 0)
+                  (selCmd === "sync_templates" && tillTemplates.length === 0)
                 }
                 className="px-4 py-2 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-500
                   disabled:opacity-50 disabled:cursor-not-allowed"

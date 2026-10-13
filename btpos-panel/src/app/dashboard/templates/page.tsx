@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { withAuth } from "@/components/withAuth";
 import { apiFetch } from "@/services/api";
-import type { ReceiptTemplate, TriggerType } from "@/types/templates";
+import { isPdfmeTemplate, type ReceiptTemplate, type TriggerType } from "@/types/templates";
+import { buildTemplateFile, downloadTemplateFile, paperOf, parseTemplateFile } from "@/lib/templateTransfer";
 
 const TRIGGER_LABELS: Record<TriggerType, string> = {
   satis: "🛒 Satış",
@@ -21,6 +22,8 @@ function TemplatesPage() {
   const [templates, setTemplates] = useState<ReceiptTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void load();
@@ -62,6 +65,44 @@ function TemplatesPage() {
     }
   }
 
+  function exportTemplate(t: ReceiptTemplate) {
+    try {
+      downloadTemplateFile(buildTemplateFile(t));
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Dışa aktarılamadı.");
+    }
+  }
+
+  /** .btpos-sablon.json → YENİ şablon olarak kaydet (mevcut şablonların üzerine yazmaz) */
+  async function importTemplate(fileObj: File) {
+    setImporting(true);
+    try {
+      const { file, warnings } = parseTemplateFile(await fileObj.text(), fileObj.name.replace(/\.btpos-sablon\.json$|\.json$/i, ""));
+      if (warnings.length && !confirm(`Uyarılar:\n\n- ${warnings.join("\n- ")}\n\nYine de içe aktarılsın mı?`)) return;
+      const res = await apiFetch<{ id?: string }>("/templates/{company_id}", {
+        method: "POST",
+        body: JSON.stringify({
+          name: `${file.name} (içe aktarıldı)`,
+          template_type: file.template_type,
+          trigger_type: file.trigger_type,
+          ...paperOf(file.template, file.template_type),
+          schema: file.template,
+          is_default: false,
+        }),
+      });
+      if (res?.id) {
+        router.push(`/dashboard/templates/edit?id=${res.id}`);
+      } else {
+        void load();
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "İçe aktarılamadı.");
+    } finally {
+      setImporting(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
   async function sendToTerminals(id: string) {
     try {
       await apiFetch(`/templates/{company_id}/send-to-terminals`, {
@@ -92,9 +133,37 @@ function TemplatesPage() {
             Fiş ve rapor şablonlarını tasarlayın, kasalara gönderin
           </p>
         </div>
+        <div style={{ display: "flex", gap: 8 }}>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".json,application/json"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void importTemplate(f);
+          }}
+        />
         <button
           type="button"
-          onClick={() => router.push("/dashboard/templates/new")}
+          onClick={() => fileRef.current?.click()}
+          disabled={importing}
+          style={{
+            padding: "8px 16px",
+            borderRadius: 8,
+            border: "1px solid #E5E7EB",
+            background: "white",
+            color: "#374151",
+            fontWeight: 600,
+            fontSize: 13,
+            cursor: "pointer",
+          }}
+        >
+          {importing ? "İçe aktarılıyor…" : "İçe Aktar"}
+        </button>
+        <button
+          type="button"
+          onClick={() => router.push("/dashboard/templates/edit?id=new")}
           style={{
             padding: "8px 16px",
             borderRadius: 8,
@@ -108,6 +177,7 @@ function TemplatesPage() {
         >
           + Yeni Şablon
         </button>
+        </div>
       </div>
 
       {error && (
@@ -172,8 +242,25 @@ function TemplatesPage() {
                   <span>{TRIGGER_LABELS[t.trigger_type]}</span>
                   <span>·</span>
                   <span>
-                    {t.template_type === "thermal" ? "🖨️ Termal" : "📄 PDF"}
+                    {t.template_type === "label"
+                      ? "🏷️ Etiket"
+                      : t.template_type === "pdf"
+                        ? "📄 PDF"
+                        : "🖨️ Termal"}
                   </span>
+                  {!isPdfmeTemplate(t.schema) && (
+                    <span
+                      style={{
+                        background: "#FEF3C7",
+                        color: "#92400E",
+                        borderRadius: 4,
+                        padding: "0 6px",
+                        fontSize: 11,
+                      }}
+                    >
+                      Eski editör
+                    </span>
+                  )}
                   <span>·</span>
                   <span>
                     {t.paper_width_mm}mm
@@ -210,24 +297,44 @@ function TemplatesPage() {
                 >
                   {t.is_default ? "★ Varsayılan" : "☆ Varsayılan Yap"}
                 </button>
+                {t.template_type !== "label" && (
+                  <button
+                    type="button"
+                    onClick={() => void sendToTerminals(t.id!)}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: 6,
+                      fontSize: 12,
+                      border: "1px solid #C8E6C9",
+                      background: "#F1F8F1",
+                      color: "#2E7D32",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Kasaya Gönder
+                  </button>
+                )}
+                {isPdfmeTemplate(t.schema) && (
+                  <button
+                    type="button"
+                    onClick={() => exportTemplate(t)}
+                    title="Şablonu dosya olarak indir (başka şirkete / panele taşımak için)"
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: 6,
+                      fontSize: 12,
+                      border: "1px solid #E5E7EB",
+                      background: "white",
+                      color: "#374151",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Dışa Aktar
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => void sendToTerminals(t.id!)}
-                  style={{
-                    padding: "6px 12px",
-                    borderRadius: 6,
-                    fontSize: 12,
-                    border: "1px solid #C8E6C9",
-                    background: "#F1F8F1",
-                    color: "#2E7D32",
-                    cursor: "pointer",
-                  }}
-                >
-                  Kasaya Gönder
-                </button>
-                <button
-                  type="button"
-                  onClick={() => router.push(`/dashboard/templates/${t.id}`)}
+                  onClick={() => router.push(`/dashboard/templates/edit?id=${t.id}`)}
                   style={{
                     padding: "6px 12px",
                     borderRadius: 6,

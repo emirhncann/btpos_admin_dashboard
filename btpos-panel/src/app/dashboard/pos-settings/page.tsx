@@ -120,6 +120,7 @@ interface Settings {
   allowExitWithHeldDocs: boolean;
   cariPaymentUsePavo: boolean;
   printBehavior: Record<PrintBehaviorKey, PrintBehaviorMode>;
+  printMulti: boolean;
 }
 
 const DEFAULT_PRINT_BEHAVIOR: Record<PrintBehaviorKey, PrintBehaviorMode> = {
@@ -254,7 +255,7 @@ function panelsForError(message: string): Panel[] {
     if (!hits.includes(panel)) hits.push(panel);
   };
   if (text.includes("default_template_ids") || text.includes("fiş şablon")) add("templates");
-  if (text.includes("print_behavior") || text.includes("fiş davranış")) add("print");
+  if (text.includes("print_behavior") || text.includes("print_multi") || text.includes("fiş davranış")) add("print");
   if (text.includes("button_colors") || text.includes("buton") || text.includes("zemin rengi") || text.includes("yazı rengi")) add("colors");
   if (text.includes("touch_keyboard") || text.includes("customer_display") || text.includes("login_with")) add("general");
   if (text.includes("invoice_type") || text.includes("torba_cari") || text.includes("cari_payment")) add("invoice");
@@ -635,6 +636,7 @@ const DEFAULT: Settings = {
   allowExitWithHeldDocs: true,
   cariPaymentUsePavo: false,
   printBehavior: { ...DEFAULT_PRINT_BEHAVIOR },
+  printMulti: false,
 };
 
 
@@ -1197,6 +1199,7 @@ function PosSettingsPage() {
       allowExitWithHeldDocs: Boolean(d.allow_exit_with_held_docs ?? true),
       cariPaymentUsePavo: Boolean(d.cari_payment_use_pavo ?? false),
       printBehavior: parsePrintBehavior(d.print_behavior),
+      printMulti: d.print_multi === true || d.print_multi === 1 || d.print_multi === "1",
     });
     if (selectedNode?.type === "cashier") {
       const theme = normalizeThemeKey(d.theme);
@@ -1250,6 +1253,7 @@ function PosSettingsPage() {
       show_code: settings.showCode,
       show_barcode: settings.showBarcode,
       print_behavior: settings.printBehavior,
+      print_multi: settings.printMulti === true,
       theme: cashierTheme,
       button_colors: buttonColorsPayload(buttonColors, THEMES[cashierTheme].buttons),
     };
@@ -1341,6 +1345,7 @@ function PosSettingsPage() {
         allowExitWithHeldDocs: Boolean(d.allow_exit_with_held_docs ?? true),
         cariPaymentUsePavo: Boolean(d.cari_payment_use_pavo ?? false),
         printBehavior: parsePrintBehavior(d.print_behavior),
+        printMulti: d.print_multi === true || d.print_multi === 1 || d.print_multi === "1",
       });
       if (node.type === "cashier") {
         const theme = normalizeThemeKey(d.theme);
@@ -2584,6 +2589,29 @@ function PosSettingsPage() {
                     <div style={{ fontSize: 13, fontWeight: 700, color: "#D97706", marginBottom: 16 }}>
                       🖨️ Fiş Davranışı
                     </div>
+
+                    <label style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={settings.printMulti}
+                        onChange={(e) => setSettings((s) => ({ ...s, printMulti: e.target.checked }))}
+                        style={{ marginTop: 2 }}
+                      />
+                      <span>
+                        <span style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#374151" }}>
+                          Birden fazla fiş yazdırılabilsin
+                        </span>
+                        <span style={{ display: "block", fontSize: 12, color: "#6B7280", marginTop: 4, lineHeight: 1.45 }}>
+                          Yazdırma penceresi bir fiş basıldıktan sonra kapanmaz; kasiyer aynı satış için
+                          başka şablonları da (ör. Depo Teslim Fişi) basabilir. Pencereyi &quot;Bitti&quot; ile kapatır.
+                        </span>
+                      </span>
+                    </label>
+                    {!Object.values(settings.printBehavior).some((mode) => mode === "ask") && (
+                      <div style={{ fontSize: 12, color: "#9CA3AF", margin: "0 0 16px 26px" }}>
+                        Etkili olması için en az bir belge türünü &apos;Sor&apos; yapın.
+                      </div>
+                    )}
 
                     {PRINT_ROWS.map(({ key, label }) => (
                       <div key={key} style={{ display: "flex", alignItems: "center",
