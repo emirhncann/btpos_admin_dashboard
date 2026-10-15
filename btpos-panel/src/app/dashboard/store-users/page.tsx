@@ -8,11 +8,12 @@
 
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { withAuth } from "@/components/withAuth";
-import { apiFetch } from "@/services/api";
+import { ApiError, apiFetch } from "@/services/api";
 
 interface StoreUser {
   id: string;
-  username: string;
+  email?: string | null;
+  username?: string | null;
   display_name: string;
   permissions: string[];
   is_active: boolean;
@@ -26,7 +27,7 @@ interface PermissionDef {
 
 type Form = {
   display_name: string;
-  username: string;
+  email: string;
   password: string;
   permissions: string[];
   is_active: boolean;
@@ -34,13 +35,17 @@ type Form = {
 
 const EMPTY_FORM: Form = {
   display_name: "",
-  username: "",
+  email: "",
   password: "",
   permissions: [],
   is_active: true,
 };
 
-const USERNAME_RE = /^[a-z0-9._-]{3,32}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function hasEmail(user: { email?: string | null }): boolean {
+  return typeof user.email === "string" && user.email.trim().length > 0;
+}
 
 const inputStyle: CSSProperties = {
   width: "100%",
@@ -72,6 +77,7 @@ function StoreUsersPage() {
   const [form, setForm] = useState<Form>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ ok: boolean; text: string } | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
 
   const selected = users.find((u) => u.id === selectedId) ?? null;
 
@@ -103,15 +109,17 @@ function StoreUsersPage() {
   function startNew() {
     setIsNew(true);
     setSelectedId(null);
+    setEmailError(null);
     setForm(EMPTY_FORM);
   }
 
   function selectUser(u: StoreUser) {
     setIsNew(false);
     setSelectedId(u.id);
+    setEmailError(null);
     setForm({
       display_name: u.display_name,
-      username: u.username,
+      email: u.email?.trim() ?? "",
       password: "",
       permissions: u.permissions ?? [],
       is_active: u.is_active !== false,
@@ -131,9 +139,9 @@ function StoreUsersPage() {
     }));
   }
 
-  const usernameOk = USERNAME_RE.test(form.username);
+  const emailOk = EMAIL_RE.test(form.email.trim());
   const passwordOk = isNew ? form.password.length >= 6 : form.password === "" || form.password.length >= 6;
-  const canSave = !saving && form.display_name.trim() !== "" && usernameOk && passwordOk;
+  const canSave = !saving && form.display_name.trim() !== "" && emailOk && passwordOk;
 
   async function save() {
     if (!canSave) return;
@@ -141,7 +149,7 @@ function StoreUsersPage() {
     try {
       const body: Record<string, unknown> = {
         display_name: form.display_name.trim(),
-        username: form.username,
+        email: form.email.trim().toLowerCase(),
         permissions: form.permissions,
       };
       if (form.password) body.password = form.password;
@@ -169,7 +177,11 @@ function StoreUsersPage() {
         await load();
       }
     } catch (e) {
-      showToast(false, e instanceof Error ? e.message : "Kaydedilemedi.");
+      if (e instanceof ApiError && e.status === 409) {
+        setEmailError("Bu e-posta başka bir kullanıcıda kayıtlı");
+      } else {
+        showToast(false, e instanceof Error ? e.message : "Kaydedilemedi.");
+      }
     } finally {
       setSaving(false);
     }
@@ -268,9 +280,32 @@ function StoreUsersPage() {
                         <span style={{ marginLeft: 6, fontSize: 10, color: "#991B1B", fontWeight: 600 }}>PASİF</span>
                       )}
                     </div>
-                    <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 2 }}>
-                      {u.username} · {(u.permissions ?? []).length} izin
-                    </div>
+                    {hasEmail(u) ? (
+                      <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 2 }}>
+                        {u.email} · {(u.permissions ?? []).length} izin
+                      </div>
+                    ) : (
+                      <div style={{ marginTop: 6, background: "#FEF3C7", color: "#92400E", borderRadius: 6, padding: "6px 8px", fontSize: 11 }}>
+                        E-posta yok — giriş yapamaz
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            selectUser(u);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.stopPropagation();
+                              selectUser(u);
+                            }
+                          }}
+                          style={{ marginLeft: 8, fontWeight: 700, textDecoration: "underline", cursor: "pointer" }}
+                        >
+                          E-posta ekle
+                        </span>
+                      </div>
+                    )}
                   </button>
                 );
               })}
@@ -305,20 +340,32 @@ function StoreUsersPage() {
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
                 <div>
-                  <div style={labelStyle}>Kullanıcı Adı *</div>
+                  <div style={labelStyle}>E-posta *</div>
                   <input
-                    value={form.username}
-                    onChange={(e) => upd("username", e.target.value.toLowerCase().replace(/\s/g, ""))}
-                    placeholder="örn: merkez"
+                    type="email"
+                    value={form.email}
+                    onChange={(e) => {
+                      setEmailError(null);
+                      upd("email", e.target.value);
+                    }}
+                    placeholder="ornek@firma.com"
                     autoComplete="off"
+                    required
                     style={{
                       ...inputStyle,
-                      borderColor: form.username && !usernameOk ? "#FCA5A5" : "#E0E0E0",
+                      borderColor: emailError || (form.email && !emailOk) ? "#FCA5A5" : "#E0E0E0",
                     }}
                   />
-                  <div style={{ fontSize: 11, color: form.username && !usernameOk ? "#B91C1C" : "#9CA3AF", marginTop: 4 }}>
-                    3–32 karakter: küçük harf, rakam, nokta, alt çizgi, tire. Türkçe karakter ve @ yok.
-                  </div>
+                  {emailError ? (
+                    <div style={{ fontSize: 11, color: "#B91C1C", marginTop: 4 }}>{emailError}</div>
+                  ) : form.email && !emailOk ? (
+                    <div style={{ fontSize: 11, color: "#B91C1C", marginTop: 4 }}>Geçerli bir e-posta yazın.</div>
+                  ) : null}
+                  {!isNew && selected?.username?.trim() && (
+                    <div style={{ fontSize: 11, color: "#6B7280", marginTop: 4 }}>
+                      Eski kullanıcı adı: {selected.username.trim()}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div style={labelStyle}>{isNew ? "Şifre *" : "Yeni Şifre"}</div>

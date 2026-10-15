@@ -10,6 +10,7 @@ import {
   getPosCommandHistory,
 } from "@/services/api";
 import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
+import { CommandBroadcast, formatResult } from "./CommandBroadcast";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
@@ -53,6 +54,17 @@ const SYNC_COMMANDS_WITH_MODE = [
   "sync_cashiers",
 ] as const;
 
+const ONLINE_MS = 5 * 60_000;
+
+function tillPresence(terminal: Terminal): { dot: string; title: string } {
+  if (!terminal.is_installed) return { dot: "bg-gray-300", title: "Kurulmadı" };
+  const raw = terminal.last_poll_at;
+  const at = raw ? new Date(raw).getTime() : NaN;
+  if (!raw || Number.isNaN(at)) return { dot: "bg-red-500", title: "Henüz bağlanmadı" };
+  if (Date.now() - at <= ONLINE_MS) return { dot: "bg-emerald-500", title: "Çevrimiçi" };
+  return { dot: "bg-orange-500", title: "Çevrimdışı" };
+}
+
 interface Terminal {
   id: string;
   terminal_name: string;
@@ -60,6 +72,7 @@ interface Terminal {
   is_installed: boolean;
   device_uid?: string;
   last_seen_at?: string;
+  last_poll_at?: string;
   workplace_id?: string;
   terminal_number?: string;
   workplaces?: { id: string; name: string } | null;
@@ -146,6 +159,7 @@ function parseTerminalsPayload(data: unknown): Terminal[] {
       is_installed:  Boolean(r.is_installed),
       device_uid:    r.device_uid != null ? String(r.device_uid) : undefined,
       last_seen_at:  r.last_seen_at != null ? String(r.last_seen_at) : undefined,
+      last_poll_at:  r.last_poll_at != null ? String(r.last_poll_at) : undefined,
       workplace_id:  r.workplace_id != null ? String(r.workplace_id) : undefined,
       terminal_number: r.terminal_number != null ? String(r.terminal_number) : undefined,
       workplaces:
@@ -196,7 +210,7 @@ function parseHistoryPayload(data: unknown): CmdHistoryRow[] {
     return {
       id:         String(r.id ?? ""),
       status:     String(r.status ?? "pending"),
-      error:      r.error != null ? String(r.error) : undefined,
+      error:      formatResult(r.error) || undefined,
       created_at: String(r.created_at ?? ""),
       done_at:    r.done_at != null ? String(r.done_at) : undefined,
       terminal_id: r.terminal_id != null ? String(r.terminal_id) : undefined,
@@ -1055,14 +1069,14 @@ function TerminalsPage() {
                             {cmdKey === "message" && cmd?.payload?.text != null && (
                               <span className="font-normal text-gray-500">
                                 {" "}
-                                — &quot;{String(cmd.payload.text).slice(0, 40)}
-                                {String(cmd.payload.text).length > 40 ? "…" : ""}&quot;
+                                — &quot;{formatResult(cmd.payload.text).slice(0, 40)}
+                                {formatResult(cmd.payload.text).length > 40 ? "…" : ""}&quot;
                               </span>
                             )}
                             {cmdKey === "lock" && cmd?.payload?.reason != null && (
                               <span className="font-normal text-gray-500">
                                 {" "}
-                                — {String(cmd.payload.reason)}
+                                — {formatResult(cmd.payload.reason)}
                               </span>
                             )}
                           </p>
@@ -1088,9 +1102,21 @@ function TerminalsPage() {
         </div>
       )}
 
+      <h1 className="text-2xl font-bold text-gray-900">Kasa yönetimi</h1>
+
+      <CommandBroadcast
+        companyId={companyId}
+        terminals={terminals}
+        templateIds={tillTemplates.map((t) => t.id)}
+        onToast={(ok, text) => {
+          setToast({ ok, text });
+          setTimeout(() => setToast(null), 4500);
+        }}
+      />
+
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Kasa yönetimi</h1>
+          <h2 className="text-lg font-bold text-gray-900">Kasa bazlı işlemler</h2>
           <p className="text-sm text-gray-500 mt-1">
             {loading
               ? "Yükleniyor…"
@@ -1138,14 +1164,17 @@ function TerminalsPage() {
         <p className="text-center text-sm text-gray-400 py-16">Kasa bulunamadı</p>
       ) : (
         <ul className="space-y-3">
-          {terminals.map((t) => (
+          {terminals.map((t) => {
+            const presence = tillPresence(t);
+            return (
             <li
               key={t.id}
               className="flex flex-col sm:flex-row sm:items-center gap-4 rounded-xl border border-gray-200 bg-white px-4 py-4 shadow-sm"
             >
               <div className="flex items-start gap-3 flex-1 min-w-0">
                 <span
-                  className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${t.is_installed ? "bg-emerald-500" : "bg-gray-300"}`}
+                  title={presence.title}
+                  className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${presence.dot}`}
                 />
                 <div className="min-w-0">
                   <p className="text-sm font-semibold text-gray-900">
@@ -1207,7 +1236,8 @@ function TerminalsPage() {
                 </button>
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </div>

@@ -8,6 +8,7 @@ import { apiFetch, getCompanyId } from "@/services/api";
 import { VersionHint, fetchAvailableReleases, latestRelease } from "@/lib/appRelease";
 import {
   parseDashboardSummary,
+  terminalIsOnline,
   type AlertLevel,
   type DashboardSummary,
   type DashboardTerminal,
@@ -195,6 +196,38 @@ function DeviceCell({ terminal }: { terminal: DashboardTerminal }) {
   return <span style={{ color: "#166534", fontWeight: 600 }}>✓ {serialShort(serial)}</span>;
 }
 
+function seenAgo(raw: string | null): string | null {
+  if (!raw) return null;
+  const t = new Date(raw).getTime();
+  if (Number.isNaN(t)) return null;
+  const diff = Date.now() - t;
+  if (diff < 60_000) return "az önce";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} dk önce`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} saat önce`;
+  const days = Math.floor(diff / 86_400_000);
+  return days === 1 ? "1 gün önce" : `${days} gün önce`;
+}
+
+function StatusDot({ terminal }: { terminal: DashboardTerminal }) {
+  if (!terminal.is_installed) return null;
+  const live = terminalIsOnline(terminal);
+  return (
+    <span title={live ? "Çevrimiçi" : "Çevrimdışı"} style={{ color: live ? "#16A34A" : "#9CA3AF", fontSize: 14, lineHeight: 1 }}>
+      {live ? "●" : "○"}
+    </span>
+  );
+}
+
+function OfflineSeen({ terminal }: { terminal: DashboardTerminal }) {
+  if (!terminal.is_installed || terminalIsOnline(terminal)) return null;
+  const ago = seenAgo(terminal.last_poll_at ?? terminal.last_seen);
+  return (
+    <span style={{ color: "#9CA3AF", fontWeight: 500, fontSize: 12 }}>
+      {ago ? `son görülme ${ago}` : "henüz bağlanmadı"}
+    </span>
+  );
+}
+
 function SeenCell({ lastSeen }: { lastSeen: string | null }) {
   const seen = relativeSeen(lastSeen);
   return (
@@ -206,6 +239,230 @@ function SeenCell({ lastSeen }: { lastSeen: string | null }) {
 
 function SkeletonBlock({ height }: { height: number }) {
   return <div style={{ height, borderRadius: 12, background: "#E5E7EB" }} />;
+}
+
+function contactRaw(terminal: DashboardTerminal): string | null {
+  return terminal.last_poll_at ?? terminal.last_seen;
+}
+
+function contactMs(terminal: DashboardTerminal): number {
+  const raw = contactRaw(terminal);
+  if (!raw) return Number.NEGATIVE_INFINITY;
+  const t = new Date(raw).getTime();
+  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+}
+
+function relativeContact(raw: string | null): string {
+  if (!raw) return "hiç bağlanmadı";
+  const t = new Date(raw).getTime();
+  if (Number.isNaN(t)) return "hiç bağlanmadı";
+  const diff = Date.now() - t;
+  if (diff < 60_000) return "şimdi";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} dk önce`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} sa önce`;
+  return `${Math.floor(diff / 86_400_000)} gün önce`;
+}
+
+function istanbulDateTime(raw: string | null): string | undefined {
+  if (!raw) return undefined;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return new Intl.DateTimeFormat("tr-TR", {
+    timeZone: "Europe/Istanbul",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(d);
+}
+
+function byRecent(a: DashboardTerminal, b: DashboardTerminal): number {
+  return contactMs(b) - contactMs(a);
+}
+
+function matchesTill(terminal: DashboardTerminal, query: string): boolean {
+  const q = query.trim().toLocaleLowerCase("tr-TR");
+  if (!q) return true;
+  const hay = `${terminal.terminal_name} ${terminal.terminal_number ?? ""}`.toLocaleLowerCase("tr-TR");
+  return hay.includes(q);
+}
+
+function OnlineCard({
+  online,
+  installed,
+  offline,
+  notInstalled,
+  generatedAt,
+  terminals,
+}: {
+  online: number;
+  installed: number;
+  offline: number;
+  notInstalled: number;
+  generatedAt: string | null;
+  terminals: DashboardTerminal[];
+}) {
+  const router = useRouter();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const tone = online === 0
+    ? { fg: "#B91C1C", bg: "#FEF2F2", border: "#FECACA", dot: "#DC2626" }
+    : offline > 0
+      ? { fg: "#C2410C", bg: "#FFF7ED", border: "#FED7AA", dot: "#EA580C" }
+      : { fg: "#166534", bg: "#F0FDF4", border: "#BBF7D0", dot: "#16A34A" };
+  const bits: string[] = [];
+  if (offline > 0) bits.push(`○ ${offline} çevrimdışı`);
+  if (notInstalled > 0) bits.push(`${notInstalled} kurulmamış`);
+  const showSearch = terminals.length > 10;
+  const visible = showSearch ? terminals.filter((terminal) => matchesTill(terminal, query)) : terminals;
+  const groups: { key: string; label: string; dot: string | null; color: string; items: DashboardTerminal[] }[] = [
+    {
+      key: "online",
+      label: "Çevrimiçi",
+      dot: "●",
+      color: "#16A34A",
+      items: visible.filter((terminal) => terminal.is_installed && terminalIsOnline(terminal)).sort(byRecent),
+    },
+    {
+      key: "offline",
+      label: "Çevrimdışı",
+      dot: "○",
+      color: "#9CA3AF",
+      items: visible.filter((terminal) => terminal.is_installed && !terminalIsOnline(terminal)).sort(byRecent),
+    },
+    {
+      key: "missing",
+      label: "Kurulmamış",
+      dot: null,
+      color: "#6B7280",
+      items: visible.filter((terminal) => !terminal.is_installed).sort(byRecent),
+    },
+  ].filter((group) => group.items.length > 0);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    const onPointer = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onPointer);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onPointer);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} style={{ position: "relative", maxWidth: 440, marginBottom: 22 }}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        style={{
+          display: "block", textAlign: "left", cursor: "pointer", width: "100%",
+          background: tone.bg, border: `1px solid ${tone.border}`, borderRadius: 12,
+          padding: "14px 16px",
+        }}
+      >
+        <div style={{ fontSize: 12, fontWeight: 700, color: "#6B7280", marginBottom: 4 }}>Kasalar</div>
+        <div style={{ fontSize: 26, fontWeight: 700, color: tone.fg, lineHeight: 1.2 }}>
+          <span style={{ color: tone.dot }}>●</span> {online} / {installed} çevrimiçi
+        </div>
+        {bits.length > 0 && (
+          <div style={{ marginTop: 4, fontSize: 13, color: "#9CA3AF" }}>{bits.join(" · ")}</div>
+        )}
+        <div style={{ marginTop: 8, fontSize: 11, color: "#9CA3AF" }}>Son 5 dk içinde merkeze bağlanan kasalar</div>
+        <div style={{ fontSize: 11, color: "#9CA3AF" }}>Güncellendi {clockTime(generatedAt)}</div>
+      </button>
+      {open && (
+        <>
+          <div className="till-backdrop" onClick={() => setOpen(false)} />
+          <div className="till-pop" role="dialog" aria-label="Kasalar">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "12px 14px 8px" }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>Kasalar</div>
+              <button
+                type="button"
+                aria-label="Kapat"
+                onClick={() => setOpen(false)}
+                style={{
+                  border: "none", background: "transparent", color: "#6B7280",
+                  fontSize: 18, lineHeight: 1, cursor: "pointer", padding: 4,
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            {showSearch && (
+              <div style={{ padding: "0 14px 8px" }}>
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Kasa adı veya no"
+                  aria-label="Kasa ara"
+                  style={{
+                    width: "100%", boxSizing: "border-box",
+                    border: "1px solid #E5E7EB", borderRadius: 8,
+                    padding: "8px 10px", fontSize: 13, color: "#111827",
+                  }}
+                />
+              </div>
+            )}
+            <div className="till-pop-list">
+              {groups.length === 0 ? (
+                <div style={{ padding: "8px 14px 14px", fontSize: 13, color: "#9CA3AF" }}>
+                  {query.trim() ? "Eşleşen kasa yok." : "Henüz kasa yok."}
+                </div>
+              ) : groups.map((group) => (
+                <div key={group.key} style={{ padding: "4px 8px 8px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 6px 4px", fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", color: "#6B7280" }}>
+                    {group.dot && <span style={{ color: group.color, fontSize: 12 }}>{group.dot}</span>}
+                    {group.label.toLocaleUpperCase("tr-TR")} ({group.items.length})
+                  </div>
+                  {group.items.map((terminal) => {
+                    const raw = contactRaw(terminal);
+                    return (
+                      <button
+                        key={terminal.id}
+                        type="button"
+                        className="till-pop-row"
+                        onClick={() => router.push(`/dashboard/pos-settings?terminal=${terminal.id}`)}
+                        style={{
+                          width: "100%", display: "flex", alignItems: "baseline", gap: 8,
+                          textAlign: "left", border: "none", background: "transparent",
+                          borderRadius: 8, padding: "8px 6px", cursor: "pointer", fontSize: 13, color: "#111827",
+                        }}
+                      >
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          <span style={{ fontWeight: 600 }}>{terminal.terminal_name}</span>
+                          <span style={{ color: "#6B7280" }}>
+                            {" · "}{terminal.terminal_number ?? "—"}{" · "}{terminal.workplace_name ?? "—"}
+                          </span>
+                        </span>
+                        <span title={istanbulDateTime(raw)} style={{ flexShrink: 0, color: "#6B7280", fontSize: 12 }}>
+                          {relativeContact(raw)}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+            <div style={{ borderTop: "1px solid #F3F4F6", padding: "10px 14px 12px", textAlign: "right" }}>
+              <Link href="/dashboard/terminals" style={{ fontSize: 13, fontWeight: 700, color: "#1565C0", textDecoration: "none" }}>
+                Kasa Yönetimi&apos;ne git →
+              </Link>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 function DashboardPage() {
@@ -259,10 +516,10 @@ function DashboardPage() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void load();
+      if (!document.hidden) void load();
     }, 60_000);
     const onVisible = () => {
-      if (document.visibilityState === "visible") void load();
+      if (!document.hidden) void load();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -274,8 +531,11 @@ function DashboardPage() {
   const alerts = summary?.alerts ?? [];
   const visibleAlerts = showAllAlerts ? alerts : alerts.slice(0, 5);
   const terminals = [...(summary?.terminals ?? [])].sort((a, b) => {
-    if (a.is_installed === b.is_installed) return 0;
-    return a.is_installed ? -1 : 1;
+    const rank = (t: DashboardTerminal) => {
+      if (!t.is_installed) return 2;
+      return terminalIsOnline(t) ? 1 : 0;
+    };
+    return rank(a) - rank(b);
   });
 
   return (
@@ -285,10 +545,29 @@ function DashboardPage() {
         .dash-cards { display: none; }
         .dash-row:hover { background: #F8FAFC; }
         .dash-spin { display: inline-block; animation: dash-spin 0.8s linear infinite; }
+        .till-backdrop { display: none; }
+        .till-pop {
+          position: absolute; top: calc(100% + 8px); left: 0; z-index: 40;
+          width: min(440px, calc(100vw - 32px)); max-height: 60vh;
+          display: flex; flex-direction: column; overflow: hidden;
+          background: white; border: 1px solid #E5E7EB; border-radius: 12px;
+          box-shadow: 0 12px 40px rgba(17, 24, 39, 0.16);
+        }
+        .till-pop-list { overflow: auto; min-height: 0; }
+        .till-pop-row:hover { background: #F8FAFC; }
         @keyframes dash-spin { to { transform: rotate(360deg); } }
         @media (max-width: 720px) {
           .dash-table-wrap { display: none; }
           .dash-cards { display: flex; flex-direction: column; gap: 10px; }
+          .till-backdrop {
+            display: block; position: fixed; inset: 0; z-index: 40;
+            background: rgba(17, 24, 39, 0.35);
+          }
+          .till-pop {
+            position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+            width: 100%; max-height: 60vh; z-index: 41;
+            border-radius: 16px 16px 0 0;
+          }
         }
       `}</style>
 
@@ -360,6 +639,14 @@ function DashboardPage() {
 
       {summary && (
         <>
+          <OnlineCard
+            online={summary.online_summary.online}
+            installed={summary.online_summary.installed}
+            offline={summary.online_summary.offline}
+            notInstalled={summary.online_summary.not_installed}
+            generatedAt={summary.generated_at}
+            terminals={summary.terminals}
+          />
           <section style={{ minHeight: SECTION_MIN.alerts }}>
             <h2 style={{ fontSize: 15, fontWeight: 700, color: "#111827", margin: "0 0 10px" }}>
               {alerts.length > 0 ? `⚠ Dikkat Gerektirenler (${alerts.length})` : "Dikkat Gerektirenler"}
@@ -404,7 +691,7 @@ function DashboardPage() {
             )}
           </section>
 
-          <section style={{ marginTop: 22, minHeight: SECTION_MIN.terminals }}>
+          <section id="kasalar" style={{ marginTop: 22, minHeight: SECTION_MIN.terminals }}>
             <h2 style={{ fontSize: 15, fontWeight: 700, color: "#111827", margin: "0 0 10px" }}>Kasalar</h2>
             {terminals.length === 0 ? (
               <div style={{
@@ -445,7 +732,9 @@ function DashboardPage() {
                           >
                             <td style={{ padding: "12px", borderBottom: "1px solid #F3F4F6", fontWeight: 600, color: "#111827" }}>
                               <span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                <StatusDot terminal={terminal} />
                                 {terminalLabel(terminal)}
+                                <OfflineSeen terminal={terminal} />
                                 {!terminal.is_installed && <Pill text="Kurulmadı" color="#6B7280" bg="#F3F4F6" />}
                               </span>
                             </td>
@@ -492,7 +781,9 @@ function DashboardPage() {
                         }}
                       >
                         <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <StatusDot terminal={terminal} />
                           {terminalLabel(terminal)}
+                          <OfflineSeen terminal={terminal} />
                           {!terminal.is_installed && <Pill text="Kurulmadı" color="#6B7280" bg="#F3F4F6" />}
                         </div>
                         <div><span style={{ color: "#6B7280" }}>İşyeri: </span>{terminal.workplace_name ?? "—"}</div>

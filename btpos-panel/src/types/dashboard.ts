@@ -49,11 +49,22 @@ export interface DashboardTerminal {
   last_command: TerminalLastCommand | null;
   pending_commands: number;
   last_seen: string | null;
+  last_poll_at: string | null;
+  /** Sunucu açıkça gönderdiyse; yoksa son 5 dk kuralıyla hesaplanır. */
+  online: boolean | null;
   app_version: string | null;
+}
+
+export interface OnlineSummary {
+  online: number;
+  installed: number;
+  offline: number;
+  not_installed: number;
 }
 
 export interface DashboardSummary {
   generated_at: string | null;
+  online_summary: OnlineSummary;
   alerts: DashboardAlert[];
   terminals: DashboardTerminal[];
   recent_commands: RecentCommand[];
@@ -169,21 +180,59 @@ function mapTerminal(value: unknown): DashboardTerminal | null {
     last_command: mapLastCommand(row.last_command),
     pending_commands: numOrZero(row.pending_commands),
     last_seen: textOrNull(row.last_seen),
+    last_poll_at: textOrNull(row.last_poll_at),
+    online: typeof row.online === "boolean" ? row.online : null,
     app_version: textOrNull(row.app_version) ?? backup?.app_version ?? null,
+  };
+}
+
+const ONLINE_WINDOW_MS = 5 * 60_000;
+
+export function terminalIsOnline(terminal: DashboardTerminal, now = Date.now()): boolean {
+  if (!terminal.is_installed) return false;
+  if (terminal.online != null) return terminal.online;
+  const raw = terminal.last_poll_at ?? terminal.last_seen;
+  if (!raw) return false;
+  const t = new Date(raw).getTime();
+  if (Number.isNaN(t)) return false;
+  return now - t <= ONLINE_WINDOW_MS;
+}
+
+export function resolveOnlineSummary(raw: unknown, terminals: DashboardTerminal[], now = Date.now()): OnlineSummary {
+  const row = asRecord(raw);
+  if (row && (row.online != null || row.installed != null)) {
+    const installed = numOrZero(row.installed);
+    const online = numOrZero(row.online);
+    return {
+      online,
+      installed,
+      offline: row.offline != null ? numOrZero(row.offline) : Math.max(0, installed - online),
+      not_installed: numOrZero(row.not_installed),
+    };
+  }
+  const installed = terminals.filter((t) => t.is_installed);
+  const online = installed.filter((t) => terminalIsOnline(t, now)).length;
+  return {
+    online,
+    installed: installed.length,
+    offline: installed.length - online,
+    not_installed: terminals.filter((t) => !t.is_installed).length,
   };
 }
 
 export function parseDashboardSummary(raw: unknown): DashboardSummary | null {
   const row = asRecord(raw);
   if (!row || !Array.isArray(row.terminals) || !Array.isArray(row.alerts)) return null;
+  const terminals = row.terminals
+    .map(mapTerminal)
+    .filter((item): item is DashboardTerminal => item != null);
   return {
     generated_at: textOrNull(row.generated_at),
+    online_summary: resolveOnlineSummary(row.online_summary, terminals),
     alerts: row.alerts
       .map(mapAlert)
       .filter((item): item is DashboardAlert => item != null),
-    terminals: row.terminals
-      .map(mapTerminal)
-      .filter((item): item is DashboardTerminal => item != null),
+    terminals,
     recent_commands: (Array.isArray(row.recent_commands) ? row.recent_commands : [])
       .map(mapRecentCommand)
       .filter((item): item is RecentCommand => item != null)
