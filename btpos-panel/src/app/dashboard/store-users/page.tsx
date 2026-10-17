@@ -17,6 +17,7 @@ interface StoreUser {
   display_name: string;
   permissions: string[];
   is_active: boolean;
+  max_labels_per_print?: number | null;
   last_login?: string | null;
 }
 
@@ -31,7 +32,11 @@ type Form = {
   password: string;
   permissions: string[];
   is_active: boolean;
+  max_labels_per_print: string;
 };
+
+const LABEL_PERM = "labels.print";
+const LABEL_DEFAULT = "999";
 
 const EMPTY_FORM: Form = {
   display_name: "",
@@ -39,7 +44,25 @@ const EMPTY_FORM: Form = {
   password: "",
   permissions: [],
   is_active: true,
+  max_labels_per_print: LABEL_DEFAULT,
 };
+
+function digitsOnly(value: string): string {
+  return value.replace(/\D/g, "").slice(0, 4);
+}
+
+function labelLimitOk(value: string): boolean {
+  if (!/^\d+$/.test(value)) return false;
+  const n = Number(value);
+  return n >= 1 && n <= 5000;
+}
+
+function labelLimitText(user: StoreUser): string {
+  if (!(user.permissions ?? []).includes(LABEL_PERM)) return "—";
+  const n = user.max_labels_per_print;
+  if (typeof n === "number" && Number.isFinite(n)) return String(n);
+  return LABEL_DEFAULT;
+}
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -78,6 +101,7 @@ function StoreUsersPage() {
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ ok: boolean; text: string } | null>(null);
   const [emailError, setEmailError] = useState<string | null>(null);
+  const [labelError, setLabelError] = useState<string | null>(null);
 
   const selected = users.find((u) => u.id === selectedId) ?? null;
 
@@ -110,6 +134,7 @@ function StoreUsersPage() {
     setIsNew(true);
     setSelectedId(null);
     setEmailError(null);
+    setLabelError(null);
     setForm(EMPTY_FORM);
   }
 
@@ -117,12 +142,16 @@ function StoreUsersPage() {
     setIsNew(false);
     setSelectedId(u.id);
     setEmailError(null);
+    setLabelError(null);
     setForm({
       display_name: u.display_name,
       email: u.email?.trim() ?? "",
       password: "",
       permissions: u.permissions ?? [],
       is_active: u.is_active !== false,
+      max_labels_per_print: typeof u.max_labels_per_print === "number" && Number.isFinite(u.max_labels_per_print)
+        ? String(u.max_labels_per_print)
+        : LABEL_DEFAULT,
     });
   }
 
@@ -131,27 +160,36 @@ function StoreUsersPage() {
   }
 
   function togglePerm(key: string) {
-    setForm((f) => ({
-      ...f,
-      permissions: f.permissions.includes(key)
-        ? f.permissions.filter((p) => p !== key)
-        : [...f.permissions, key],
-    }));
+    setLabelError(null);
+    setForm((f) => {
+      const has = f.permissions.includes(key);
+      const permissions = has ? f.permissions.filter((p) => p !== key) : [...f.permissions, key];
+      const turningOn = key === LABEL_PERM && !has;
+      return {
+        ...f,
+        permissions,
+        max_labels_per_print: turningOn && f.max_labels_per_print === "" ? LABEL_DEFAULT : f.max_labels_per_print,
+      };
+    });
   }
 
   const emailOk = EMAIL_RE.test(form.email.trim());
   const passwordOk = isNew ? form.password.length >= 6 : form.password === "" || form.password.length >= 6;
-  const canSave = !saving && form.display_name.trim() !== "" && emailOk && passwordOk;
+  const printsLabels = form.permissions.includes(LABEL_PERM);
+  const labelOk = !printsLabels || labelLimitOk(form.max_labels_per_print);
+  const canSave = !saving && form.display_name.trim() !== "" && emailOk && passwordOk && labelOk;
 
   async function save() {
     if (!canSave) return;
     setSaving(true);
+    setLabelError(null);
     try {
       const body: Record<string, unknown> = {
         display_name: form.display_name.trim(),
         email: form.email.trim().toLowerCase(),
         permissions: form.permissions,
       };
+      if (printsLabels) body.max_labels_per_print = Number(form.max_labels_per_print);
       if (form.password) body.password = form.password;
 
       if (isNew) {
@@ -179,6 +217,8 @@ function StoreUsersPage() {
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         setEmailError("Bu e-posta başka bir kullanıcıda kayıtlı");
+      } else if (e instanceof ApiError && e.status === 400) {
+        setLabelError(e.message.replace(/^Kaydedilemedi:\s*/, ""));
       } else {
         showToast(false, e instanceof Error ? e.message : "Kaydedilemedi.");
       }
@@ -306,6 +346,9 @@ function StoreUsersPage() {
                         </span>
                       </div>
                     )}
+                    <div style={{ fontSize: 11, color: "#6B7280", marginTop: 4 }}>
+                      Etiket sınırı: {labelLimitText(u)}
+                    </div>
                   </button>
                 );
               })}
@@ -419,6 +462,29 @@ function StoreUsersPage() {
                   )}
                 </div>
               </div>
+
+              {printsLabels && (
+                <div>
+                  <div style={labelStyle}>Tek seferde en fazla etiket</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      value={form.max_labels_per_print}
+                      inputMode="numeric"
+                      onChange={(e) => {
+                        setLabelError(null);
+                        upd("max_labels_per_print", digitsOnly(e.target.value));
+                      }}
+                      style={{ ...inputStyle, width: 96 }}
+                    />
+                    <span style={{ fontSize: 12, color: "#9CA3AF" }}>(1–5000)</span>
+                  </div>
+                  {labelError ? (
+                    <div style={{ fontSize: 11, color: "#B91C1C", marginTop: 4 }}>{labelError}</div>
+                  ) : !labelOk ? (
+                    <div style={{ fontSize: 11, color: "#B91C1C", marginTop: 4 }}>1 ile 5000 arasında bir sayı yazın.</div>
+                  ) : null}
+                </div>
+              )}
 
               {!isNew && (
                 <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, cursor: "pointer" }}>
