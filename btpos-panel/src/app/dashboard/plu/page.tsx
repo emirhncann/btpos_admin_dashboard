@@ -3,6 +3,8 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { withAuth } from "@/components/withAuth";
 import { USER_KEY, TOKEN_KEY } from "@/context/AuthContext";
+import ProductPicker from "@/components/ProductPicker";
+import { fetchProductPage, findProductByBarcode, type LabelProduct } from "@/lib/products/catalog";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 
@@ -12,7 +14,6 @@ const PRESET_COLORS = [
   "#43A047","#7CB342","#C0CA33","#F9A825",
   "#FB8C00","#F4511E","#6D4C41","#546E7A",
 ];
-const MODAL_SEARCH_LIMIT = 30;
 const PLU_GROUP_NAME_MAX_LENGTH = 21;
 
 interface Cashier   { id: string; full_name: string; cashier_code: string }
@@ -139,6 +140,15 @@ function toImportExportGroups(raw: unknown): ImportExportGroup[] {
     }).filter(it => it.product_code.length > 0);
     return { name: String(rec.name ?? `Grup ${idx + 1}`), color: String(rec.color ?? "#1E88E5"), sort_order: Number(rec.sort_order ?? idx), items };
   });
+}
+
+function alreadySuffix(n: number): string {
+  const last = String(n).slice(-1);
+  if (last === "2" || last === "7") return "si";
+  if (last === "3" || last === "4") return "ü";
+  if (last === "6") return "sı";
+  if (last === "9" || last === "0") return "u";
+  return "i";
 }
 
 function hexToSoft(hex: string): string {
@@ -330,24 +340,12 @@ function PluPage() {
   const [itemError, setItemError] = useState("");
   const [scanMsg, setScanMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const scanMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [addItemModal, setAddItemModal] = useState(false);
-  const [selectedProducts, setSelectedProducts] = useState<Map<string, ErpProduct>>(new Map());
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [savingItems, setSavingItems] = useState(false);
   const [showConflictWarning, setShowConflictWarning] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ ok: boolean; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const [searchName,    setSearchName]    = useState("");
-  const [searchCode,    setSearchCode]    = useState("");
-  const [searchBarcode, setSearchBarcode] = useState("");
-  const [searchResults, setSearchResults] = useState<ErpProduct[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchPage,    setSearchPage]    = useState(1);
-  const [searchTotal,   setSearchTotal]   = useState(0);
-  const searchNameRef    = useRef<HTMLInputElement>(null);
-  const searchCodeRef    = useRef<HTMLInputElement>(null);
-  const searchBarcodeRef = useRef<HTMLInputElement>(null);
 
   const barcodeBuffer = useRef("");
   const barcodeTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -514,130 +512,53 @@ function PluPage() {
     }
   }, [activeGroup, companyId, reloadGroups, selectedNode]);
 
-  const doSearch = useCallback(async (name: string, code: string, barcode: string, page = 1) => {
-    const active = [name.trim(), code.trim(), barcode.trim()].find(v => v.length >= 2);
-    if (!active) { setSearchResults([]); setSearchTotal(0); return; }
-    const q = barcode.trim() || code.trim() || name.trim();
-    setSearchLoading(true);
-    try {
-      const res = await apiFetch(`/integration/products/search/${companyId}?q=${encodeURIComponent(q)}&page=${page}&limit=${MODAL_SEARCH_LIMIT}`);
-      const root = res && typeof res === "object" ? (res as Record<string, unknown>) : {};
-      const dataField = root.data;
-      const nested = dataField && typeof dataField === "object" && !Array.isArray(dataField)
-        ? (dataField as Record<string, unknown>)
-        : null;
-      const rawList: unknown[] = Array.isArray(dataField)
-        ? dataField
-        : nested && Array.isArray(nested.data)
-          ? nested.data as unknown[]
-          : Array.isArray(res)
-            ? res
-            : [];
-      setSearchResults(rawList.map((item) => {
-        const r = item as ErpProduct & Record<string, unknown>;
-        const code = String(r.code ?? r.product_code ?? r.productCode ?? r.Code ?? "").trim();
-        const name = String(r.name ?? r.product_name ?? r.productName ?? "").trim();
-        const barcodeVal = String(r.barcode ?? r.product_barcode ?? r.productBarcode ?? "").trim();
-        const mainUnitName = typeof r.mainUnitName === "string" ? r.mainUnitName : typeof r.main_unit_name === "string" ? r.main_unit_name : undefined;
-        const vr = r.vatRate ?? r.vat_rate;
-        const vatRate = typeof vr === "number" && !Number.isNaN(vr) ? vr : typeof vr === "string" ? (parseFloat(vr) || undefined) : undefined;
-        return {
-          id: String(r.id ?? code),
-          code,
-          name: name || code,
-          ...(barcodeVal ? { barcode: barcodeVal } : {}),
-          salesPriceTaxIncluded: typeof r.salesPriceTaxIncluded === "number" ? r.salesPriceTaxIncluded : undefined,
-          mainUnitName,
-          vatRate,
-        } as ErpProduct;
-      }).filter((p) => p.code.length > 0));
-      const totalRaw = root.total ?? nested?.total;
-      setSearchTotal(typeof totalRaw === "number" ? totalRaw : 0);
-      setSearchPage(page);
-    } catch { setSearchResults([]); }
-    finally { setSearchLoading(false); }
-  }, [companyId]);
-
-  useEffect(() => {
-    if (!addItemModal) return;
-    const t = setTimeout(() => void doSearch(searchName, searchCode, searchBarcode, 1), 400);
-    return () => clearTimeout(t);
-  }, [searchName, searchCode, searchBarcode, addItemModal, doSearch]);
-
-  useEffect(() => {
-    if (addItemModal) {
-      setSearchName(""); setSearchCode(""); setSearchBarcode("");
-      setSearchResults([]); setSearchTotal(0); setSearchPage(1);
-      setItemError("");
-      setSelectedProducts(new Map());
-      setTimeout(() => searchNameRef.current?.focus(), 50);
-    }
-  }, [addItemModal]);
-
-  const closeAddItemModal = useCallback(() => {
-    setAddItemModal(false);
-    setSelectedProducts(new Map());
-  }, []);
-
-  const toggleProduct = useCallback((code: string, product: ErpProduct) => {
-    setSelectedProducts(prev => {
-      const next = new Map(prev);
-      if (next.has(code)) next.delete(code);
-      else next.set(code, product);
-      return next;
-    });
-  }, []);
-
-  const addSelectedItems = useCallback(async () => {
-    if (selectedProducts.size === 0) return;
+  const addPicked = useCallback(async (products: LabelProduct[]) => {
+    if (!activeGroup) return;
     setSavingItems(true);
     setItemError("");
-
+    const seen = new Set<string>();
+    for (const item of activeGroup.plu_items ?? []) {
+      if (item.product_code) seen.add(item.product_code);
+    }
+    let added = 0;
+    let skipped = 0;
     const failed: string[] = [];
-    for (const [code, product] of selectedProducts.entries()) {
-      const res = await addItem(code, product);
-      if (!res.ok) failed.push(product.name ?? code);
-    }
-
-    setSavingItems(false);
-
-    if (failed.length === 0) {
-      closeAddItemModal();
-      return;
-    }
-
-    // Hata varsa modal açık kalır, eklenemeyenler seçili bırakılır
-    setSelectedProducts(prev => {
-      const next = new Map<string, ErpProduct>();
-      for (const [code, product] of prev.entries()) {
-        if (failed.includes(product.name ?? code)) next.set(code, product);
+    for (const product of products) {
+      if ((product.id && seen.has(product.id)) || (product.code && seen.has(product.code))) {
+        skipped += 1;
+        continue;
       }
-      return next;
-    });
-    setItemError(`${failed.length} ürün eklenemedi: ${failed.join(", ")}`);
-  }, [addItem, closeAddItemModal, selectedProducts]);
+      const res = await addItem(product.code, {
+        id: product.id,
+        code: product.code,
+        name: product.name,
+        barcode: product.barcode,
+      });
+      if (!res.ok) {
+        failed.push(product.name || product.code);
+        continue;
+      }
+      added += 1;
+      if (product.code) seen.add(product.code);
+      if (product.id) seen.add(product.id);
+    }
+    setSavingItems(false);
+    const skippedText = skipped > 0 ? `, ${skipped}'${alreadySuffix(skipped)} zaten gruptaydı` : "";
+    const text = failed.length > 0
+      ? `${added} ürün eklendi${skippedText}. Eklenemeyen: ${failed.join(", ")}`
+      : `${added} ürün eklendi${skippedText}.`;
+    setScanMsg({ ok: failed.length === 0, text });
+    setItemError(failed.length > 0 ? text : "");
+    if (scanMsgTimer.current) clearTimeout(scanMsgTimer.current);
+    scanMsgTimer.current = setTimeout(() => setScanMsg(null), 4000);
+    setPickerOpen(false);
+  }, [activeGroup, addItem]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const modalInputs = [searchNameRef.current, searchCodeRef.current, searchBarcodeRef.current];
-      if (addItemModal) {
-        if (modalInputs.includes(document.activeElement as HTMLInputElement)) return;
-        if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-          barcodeBuffer.current += e.key;
-          if (barcodeTimer.current) clearTimeout(barcodeTimer.current);
-          barcodeTimer.current = setTimeout(() => { barcodeBuffer.current = ""; }, 100);
-        }
-        if (e.key === "Enter" && barcodeBuffer.current.length >= 4) {
-          e.preventDefault();
-          const code = barcodeBuffer.current; barcodeBuffer.current = "";
-          if (barcodeTimer.current) clearTimeout(barcodeTimer.current);
-          setSearchBarcode(code);
-          setSearchName(""); setSearchCode("");
-          void doSearch("", "", code, 1);
-          setTimeout(() => searchBarcodeRef.current?.focus(), 50);
-        }
-        return;
-      }
+      if (pickerOpen) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT")) return;
       if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
         barcodeBuffer.current += e.key;
         if (barcodeTimer.current) clearTimeout(barcodeTimer.current);
@@ -645,31 +566,20 @@ function PluPage() {
       }
       if (e.key === "Enter" && barcodeBuffer.current.length >= 4) {
         e.preventDefault();
-        const code = barcodeBuffer.current; barcodeBuffer.current = "";
+        const code = barcodeBuffer.current;
+        barcodeBuffer.current = "";
         if (barcodeTimer.current) clearTimeout(barcodeTimer.current);
         if (!activeGroup) return;
         void (async () => {
           try {
-            const data = await apiFetch(`/integration/products/search/${companyId}?q=${encodeURIComponent(code)}&limit=10`);
-            const root = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
-            const dataField = root.data;
-            const hitsRaw: unknown[] = Array.isArray(dataField) ? dataField : Array.isArray(data) ? data : [];
-            const hits = hitsRaw.map((item) => {
-              const r = item as Record<string, unknown>;
-              return {
-                code: String(r.code ?? r.product_code ?? r.productCode ?? "").trim(),
-                name: String(r.name ?? r.product_name ?? "").trim() || undefined,
-                barcode: String(r.barcode ?? r.product_barcode ?? "").trim() || undefined,
-              } as ErpProduct;
-            }).filter((p) => p.code.length > 0);
-            const exact = hits.find(p => p.barcode === code) ?? hits.find(p => p.code === code) ?? (hits.length === 1 ? hits[0] : undefined);
-            const res = await addItem(exact?.code ?? code, exact);
-            setScanMsg(res.ok
-              ? { ok: true, text: exact ? `✓ ${exact.name ?? exact.code} eklendi` : `✓ "${code}" eklendi` }
-              : { ok: false, text: res.message ?? "Eklenemedi." }
-            );
-          } catch (e) {
-            setScanMsg({ ok: false, text: e instanceof Error ? e.message : "Eklenemedi." });
+            const found = await findProductByBarcode(code);
+            if (!found) {
+              setScanMsg({ ok: false, text: "Barkod bulunamadı: " + code });
+            } else {
+              await addPicked([found]);
+            }
+          } catch (err) {
+            setScanMsg({ ok: false, text: err instanceof Error ? err.message : "Eklenemedi." });
           }
           if (scanMsgTimer.current) clearTimeout(scanMsgTimer.current);
           scanMsgTimer.current = setTimeout(() => setScanMsg(null), 3000);
@@ -678,7 +588,7 @@ function PluPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [addItemModal, activeGroup, companyId, doSearch, addItem]);
+  }, [pickerOpen, activeGroup, addPicked]);
 
   const deleteItem = async (itemId: string, code: string) => {
     if (!confirm(`"${code}" kodlu ürün bu gruptan kaldırılsın mı?`)) return;
@@ -732,9 +642,6 @@ function PluPage() {
     () => [...(currentGroup?.plu_items ?? [])].sort((a, b) => a.sort_order - b.sort_order),
     [currentGroup]
   );
-  const searchTotalPages = Math.max(1, Math.ceil(searchTotal / MODAL_SEARCH_LIMIT));
-  const hasSearchInput = searchName.trim().length >= 2 || searchCode.trim().length >= 2 || searchBarcode.trim().length >= 2;
-
   function renderTree() {
     return (
       <div style={{ display: "flex", flexDirection: "column" }}>
@@ -796,153 +703,21 @@ function PluPage() {
         </div>
       )}
 
-      {addItemModal && (
-        <div style={{ position:"fixed", inset:0, zIndex:9998, background:"rgba(0,0,0,0.45)", display:"flex", alignItems:"center", justifyContent:"center" }}>
-          <div style={{ background:"white", borderRadius:14, padding:24, width:560, maxHeight:"85vh", display:"flex", flexDirection:"column", gap:12 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <span style={{ fontSize:15, fontWeight:600 }}>ERP&apos;de Ürün Ara — {currentGroup?.name}</span>
-              <button onClick={closeAddItemModal} style={{ background:"none", border:"none", cursor:"pointer", fontSize:20, color:"#9E9E9E" }}>✕</button>
-            </div>
+      <ProductPicker
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        onConfirm={(products) => { void addPicked(products); }}
+        fetcher={(params) => fetchProductPage(params.filters, params)}
+        barcodeLookup={findProductByBarcode}
+        existingIds={(currentGroup?.plu_items ?? []).map((item) => item.product_code).filter(Boolean)}
+        existingLabel="bu grupta"
+        showQuantity={false}
+        showInsertOrder
+        prefsId={companyId ? "plu-" + companyId : "plu"}
+        title={currentGroup ? currentGroup.name + "'na Ürün Ekle" : "PLU Grubuna Ürün Ekle"}
+        confirmText={(n) => n + " ürünü ekle"}
+      />
 
-            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                <span style={{ fontSize:11, fontWeight:600, color:"#6B7280", minWidth:70 }}>Ürün Adı</span>
-                <div style={{ flex:1, position:"relative" }}>
-                  <input
-                    ref={searchNameRef}
-                    value={searchName}
-                    onChange={e => { setSearchName(e.target.value); setSearchCode(""); setSearchBarcode(""); }}
-                    onKeyDown={e => { if (e.key === "Enter" && hasSearchInput) void doSearch(searchName, searchCode, searchBarcode, 1); }}
-                    placeholder="Ürün adı ile ara..."
-                    style={{ width:"100%", border:"1px solid #E0E0E0", borderRadius:8, padding:"8px 30px 8px 12px", fontSize:13, outline:"none", boxSizing:"border-box" }}
-                  />
-                  {searchName && <button type="button" onClick={() => { setSearchName(""); setSearchResults([]); searchNameRef.current?.focus(); }} style={{ position:"absolute", right:8, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", color:"#BDBDBD", fontSize:14 }}>✕</button>}
-                </div>
-              </div>
-
-              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                <span style={{ fontSize:11, fontWeight:600, color:"#6B7280", minWidth:70 }}>Ürün Kodu</span>
-                <div style={{ flex:1, position:"relative" }}>
-                  <input
-                    ref={searchCodeRef}
-                    value={searchCode}
-                    onChange={e => { setSearchCode(e.target.value); setSearchName(""); setSearchBarcode(""); }}
-                    onKeyDown={e => { if (e.key === "Enter" && hasSearchInput) void doSearch(searchName, searchCode, searchBarcode, 1); }}
-                    placeholder="Ürün kodu ile ara..."
-                    style={{ width:"100%", border:"1px solid #E0E0E0", borderRadius:8, padding:"8px 30px 8px 12px", fontSize:13, outline:"none", boxSizing:"border-box", fontFamily:"monospace" }}
-                  />
-                  {searchCode && <button type="button" onClick={() => { setSearchCode(""); setSearchResults([]); searchCodeRef.current?.focus(); }} style={{ position:"absolute", right:8, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", color:"#BDBDBD", fontSize:14 }}>✕</button>}
-                </div>
-              </div>
-
-              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                <span style={{ fontSize:11, fontWeight:600, color:"#6B7280", minWidth:70 }}>Barkod</span>
-                <div style={{ flex:1, position:"relative" }}>
-                  <input
-                    ref={searchBarcodeRef}
-                    value={searchBarcode}
-                    onChange={e => { setSearchBarcode(e.target.value); setSearchName(""); setSearchCode(""); }}
-                    onKeyDown={e => { if (e.key === "Enter" && hasSearchInput) void doSearch(searchName, searchCode, searchBarcode, 1); }}
-                    placeholder="Barkod ile ara veya okut..."
-                    style={{ width:"100%", border:"1px solid #E0E0E0", borderRadius:8, padding:"8px 30px 8px 12px", fontSize:13, outline:"none", boxSizing:"border-box", fontFamily:"monospace" }}
-                  />
-                  {searchBarcode && <button type="button" onClick={() => { setSearchBarcode(""); setSearchResults([]); searchBarcodeRef.current?.focus(); }} style={{ position:"absolute", right:8, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", color:"#BDBDBD", fontSize:14 }}>✕</button>}
-                </div>
-              </div>
-
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                <span style={{ fontSize:11, color:"#9CA3AF" }}>En az 2 karakter — otomatik arar · Enter ile yeniler · Barkod okuyucu barkod alanına yazar</span>
-                {searchLoading && <span style={{ fontSize:12, color:"#9CA3AF" }}>⟳</span>}
-              </div>
-            </div>
-
-            {itemError && (
-              <div style={{ padding: "8px 12px", borderRadius: 8, background: "#FEF2F2",
-                border: "1px solid #FECACA", fontSize: 12, color: "#B91C1C" }}>
-                {itemError}
-              </div>
-            )}
-
-            <div style={{ flex:1, overflowY:"auto", display:"flex", flexDirection:"column", gap:4, minHeight:200 }}>
-              {!hasSearchInput && (
-                <div style={{ textAlign:"center", padding:"40px 0" }}>
-                  <div style={{ fontSize:28, marginBottom:8 }}>🔍</div>
-                  <div style={{ fontSize:13, color:"#9E9E9E" }}>Ürün adı, kodu veya barkod girin</div>
-                </div>
-              )}
-              {hasSearchInput && !searchLoading && searchResults.length === 0 && (
-                <div style={{ textAlign:"center", color:"#BDBDBD", padding:"32px 0", fontSize:13 }}>Ürün bulunamadı</div>
-              )}
-              {searchResults.map(p => {
-                const code = String(p.code ?? "").trim();
-                const isSelected = selectedProducts.has(code);
-                return (
-                <div key={p.id || p.code}
-                  onClick={() => { if (code) toggleProduct(code, p); }}
-                  style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 12px", borderRadius:8,
-                    border:`1px solid ${isSelected ? "#90CAF9" : "#F0F0F0"}`, background: isSelected ? "#EFF6FF" : "white",
-                    cursor: code ? "pointer" : "default", transition:"all 0.1s" }}
-                  onMouseEnter={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background="#F8F9FF"; }}
-                  onMouseLeave={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background="white"; }}>
-                  <div style={{ width:18, height:18, borderRadius:4, flexShrink:0, marginRight:10,
-                    border:`2px solid ${isSelected ? "#1565C0" : "#D1D5DB"}`, background: isSelected ? "#1565C0" : "white",
-                    display:"flex", alignItems:"center", justifyContent:"center", transition:"all 0.1s" }}>
-                    {isSelected && <span style={{ color:"white", fontSize:11, fontWeight:700 }}>✓</span>}
-                  </div>
-                  <div style={{ minWidth:0, flex:1 }}>
-                    <div style={{ fontSize:13, fontWeight:600, color:"#111827", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", marginBottom:5 }}>{p.name ?? p.code}</div>
-                    <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-                      {p.code && <span style={{ fontSize:10, fontFamily:"monospace", fontWeight:700, background:"#F3F4F6", color:"#374151", padding:"2px 7px", borderRadius:4 }}>KOD: {p.code}</span>}
-                      {p.barcode && <span style={{ fontSize:10, fontFamily:"monospace", background:"#EFF6FF", color:"#1D4ED8", padding:"2px 7px", borderRadius:4 }}>BARKOD: {p.barcode}</span>}
-                      {p.mainUnitName && <span style={{ fontSize:10, background:"#F0FDF4", color:"#166534", padding:"2px 7px", borderRadius:4 }}>{p.mainUnitName}</span>}
-                      {typeof p.vatRate === "number" && p.vatRate > 0 && <span style={{ fontSize:10, background:"#FFF7ED", color:"#9A3412", padding:"2px 7px", borderRadius:4 }}>KDV %{p.vatRate}</span>}
-                    </div>
-                  </div>
-                  <div style={{ flexShrink:0, marginLeft:12 }}>
-                    <span style={{ fontSize:13, fontWeight:700, color:"#1565C0" }}>
-                      {p.salesPriceTaxIncluded != null ? `${p.salesPriceTaxIncluded.toLocaleString("tr-TR", { minimumFractionDigits:2 })} ₺` : "—"}
-                    </span>
-                  </div>
-                </div>
-                );
-              })}
-            </div>
-
-            {searchTotal > MODAL_SEARCH_LIMIT && (
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", borderTop:"1px solid #F0F0F0", paddingTop:12 }}>
-                <button onClick={() => void doSearch(searchName, searchCode, searchBarcode, searchPage - 1)} disabled={searchPage <= 1}
-                  style={{ background:"#F3F4F6", border:"1px solid #E0E0E0", borderRadius:6, padding:"6px 12px", cursor:"pointer", fontSize:12, opacity:searchPage <= 1 ? 0.4 : 1 }}>← Önceki</button>
-                <span style={{ fontSize:12, color:"#9E9E9E" }}>{searchPage}/{searchTotalPages} · {searchTotal} ürün</span>
-                <button onClick={() => void doSearch(searchName, searchCode, searchBarcode, searchPage + 1)} disabled={searchPage >= searchTotalPages}
-                  style={{ background:"#F3F4F6", border:"1px solid #E0E0E0", borderRadius:6, padding:"6px 12px", cursor:"pointer", fontSize:12, opacity:searchPage >= searchTotalPages ? 0.4 : 1 }}>Sonraki →</button>
-              </div>
-            )}
-
-            <div style={{ borderTop:"1px solid #F0F0F0", paddingTop:12, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, flexShrink:0 }}>
-              <span style={{ fontSize:12, color:"#6B7280" }}>
-                {selectedProducts.size > 0 ? `${selectedProducts.size} ürün seçildi` : "Ürün seçmek için tıklayın"}
-              </span>
-              <div style={{ display:"flex", gap:8 }}>
-                {selectedProducts.size > 0 && (
-                  <button onClick={() => setSelectedProducts(new Map())} disabled={savingItems}
-                    style={{ padding:"8px 14px", borderRadius:8, border:"1px solid #E5E7EB", background:"#F9FAFB", fontSize:12, color:"#6B7280", cursor: savingItems ? "default" : "pointer" }}>
-                    Temizle
-                  </button>
-                )}
-                <button onClick={() => void addSelectedItems()} disabled={selectedProducts.size === 0 || savingItems || addingItem}
-                  style={{ padding:"8px 20px", borderRadius:8, border:"none",
-                    background: selectedProducts.size > 0 ? "#1565C0" : "#E5E7EB",
-                    color: selectedProducts.size > 0 ? "white" : "#9CA3AF",
-                    fontSize:12, fontWeight:700,
-                    cursor: selectedProducts.size > 0 && !savingItems ? "pointer" : "default",
-                    opacity: savingItems ? 0.7 : 1 }}>
-                  {savingItems ? `⟳ Ekleniyor... (${selectedProducts.size})` : `Kaydet${selectedProducts.size > 0 ? ` (${selectedProducts.size})` : ""}`}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       <div style={{ display:"flex", flex:1, overflow:"hidden", minHeight:0 }}>
 
@@ -1021,13 +796,13 @@ function PluPage() {
               )}
 
               <div style={{ margin:"8px 16px 0", fontSize:11, color:"#6B7280", background:"#F9FAFB", border:"1px solid #E5E7EB", borderRadius:6, padding:"6px 12px", display:"inline-block", alignSelf:"flex-start" }}>
-                📷 Barkod okuyucu aktif — modal kapalıyken okutunca ekler
+                Hızlı ekle: barkod okut
               </div>
 
               <div style={{ padding:"10px 16px", borderBottom:"1px solid #F0F0F0", flexShrink:0 }}>
-                <button type="button" onClick={() => setAddItemModal(true)}
+                <button type="button" onClick={() => setPickerOpen(true)} disabled={savingItems}
                   style={{ background:"#E8F5E9", border:"1px solid #A5D6A7", color:"#2E7D32", borderRadius:8, padding:"8px 18px", fontSize:13, fontWeight:600, cursor:"pointer" }}>
-                  🔍 ERP&apos;de Ürün Ara
+                  + Ürün Ekle
                 </button>
               </div>
 

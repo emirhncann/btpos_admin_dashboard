@@ -40,7 +40,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.btpos.com.tr";
 type NodeType = "terminal" | "cashier";
 type Panel =
   | "general" | "invoice" | "payment" | "barcode" | "templates" | "devices"
-  | "sales" | "discount" | "plu" | "print" | "colors";
+  | "sales" | "discount" | "plu" | "print" | "colors" | "customers";
 type DuplicateItemAction = "increase_qty" | "add_new";
 type PavoInvoiceType = "e_archive" | "paper";
 type PrintBehaviorMode = "ask" | "default" | "none";
@@ -121,6 +121,8 @@ interface Settings {
   cariPaymentUsePavo: boolean;
   printBehavior: Record<PrintBehaviorKey, PrintBehaviorMode>;
   printMulti: boolean;
+  canAddCustomer: boolean;
+  canEditCustomer: boolean;
 }
 
 const DEFAULT_PRINT_BEHAVIOR: Record<PrintBehaviorKey, PrintBehaviorMode> = {
@@ -168,6 +170,7 @@ const CASHIER_TABS: { key: Panel; label: string }[] = [
   { key: "plu", label: "PLU Görünümü" },
   { key: "print", label: "Fiş Davranışları" },
   { key: "colors", label: "🎨 Tema ve Renkler" },
+  { key: "customers", label: "Müşteri İşlemleri" },
 ];
 
 function parsePrintBehavior(raw: unknown): Record<PrintBehaviorKey, PrintBehaviorMode> {
@@ -256,6 +259,7 @@ function panelsForError(message: string): Panel[] {
   };
   if (text.includes("default_template_ids") || text.includes("fiş şablon")) add("templates");
   if (text.includes("print_behavior") || text.includes("print_multi") || text.includes("fiş davranış")) add("print");
+  if (text.includes("can_add_customer") || text.includes("can_edit_customer")) add("customers");
   if (text.includes("button_colors") || text.includes("buton") || text.includes("zemin rengi") || text.includes("yazı rengi")) add("colors");
   if (text.includes("touch_keyboard") || text.includes("customer_display") || text.includes("login_with")) add("general");
   if (text.includes("invoice_type") || text.includes("torba_cari") || text.includes("cari_payment")) add("invoice");
@@ -637,7 +641,14 @@ const DEFAULT: Settings = {
   cariPaymentUsePavo: false,
   printBehavior: { ...DEFAULT_PRINT_BEHAVIOR },
   printMulti: false,
+  canAddCustomer: true,
+  canEditCustomer: true,
 };
+
+function boolDefaultTrue(value: unknown): boolean {
+  if (value == null || value === "") return true;
+  return value === true || value === 1 || value === "1" || value === "true";
+}
 
 
 const PREV_PRODS = [
@@ -1200,6 +1211,8 @@ function PosSettingsPage() {
       cariPaymentUsePavo: Boolean(d.cari_payment_use_pavo ?? false),
       printBehavior: parsePrintBehavior(d.print_behavior),
       printMulti: d.print_multi === true || d.print_multi === 1 || d.print_multi === "1",
+      canAddCustomer: boolDefaultTrue(d.can_add_customer),
+      canEditCustomer: boolDefaultTrue(d.can_edit_customer),
     });
     if (selectedNode?.type === "cashier") {
       const theme = normalizeThemeKey(d.theme);
@@ -1254,6 +1267,8 @@ function PosSettingsPage() {
       show_barcode: settings.showBarcode,
       print_behavior: settings.printBehavior,
       print_multi: settings.printMulti === true,
+      can_add_customer: settings.canAddCustomer === true,
+      can_edit_customer: settings.canEditCustomer === true,
       theme: cashierTheme,
       button_colors: buttonColorsPayload(buttonColors, THEMES[cashierTheme].buttons),
     };
@@ -1346,6 +1361,8 @@ function PosSettingsPage() {
         cariPaymentUsePavo: Boolean(d.cari_payment_use_pavo ?? false),
         printBehavior: parsePrintBehavior(d.print_behavior),
         printMulti: d.print_multi === true || d.print_multi === 1 || d.print_multi === "1",
+        canAddCustomer: boolDefaultTrue(d.can_add_customer),
+        canEditCustomer: boolDefaultTrue(d.can_edit_customer),
       });
       if (node.type === "cashier") {
         const theme = normalizeThemeKey(d.theme);
@@ -2581,6 +2598,26 @@ function PosSettingsPage() {
                       <div style={{height:1,background:"#F0F0F0",marginBottom:20}} />
                       <GridPreview s={settings} />
                     </div>
+                  )}
+
+                  {tab==="customers" && selectedNode?.type==="cashier" && (
+                    <>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#111827", padding: "14px 0 4px" }}>
+                        Müşteri İşlemleri
+                      </div>
+                      <Row label="Yeni müşteri ekleyebilir" desc="Kapalıyken kasada yeni müşteri butonu gizlenir.">
+                        <Toggle
+                          on={settings.canAddCustomer}
+                          onChange={() => set("canAddCustomer", !settings.canAddCustomer)}
+                        />
+                      </Row>
+                      <Row label="Müşteri bilgilerini düzenleyebilir" desc="Kapalıyken kasada müşteri düzenleme gizlenir.">
+                        <Toggle
+                          on={settings.canEditCustomer}
+                          onChange={() => set("canEditCustomer", !settings.canEditCustomer)}
+                        />
+                      </Row>
+                    </>
                   )}
 
                   {tab==="print" && selectedNode?.type==="cashier" && (

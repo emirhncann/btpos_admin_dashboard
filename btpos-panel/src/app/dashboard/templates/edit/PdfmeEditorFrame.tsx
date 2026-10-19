@@ -118,7 +118,7 @@ export const PdfmeEditorFrame = forwardRef<PdfmeEditorHandle, Props>(function Pd
   return (
     <iframe
       ref={ref}
-      src="/sablon-editor/index.html?v=20261013-cari"
+      src="/sablon-editor/index.html?v=20261019-barcode"
       style={{ width: "100%", height: "100%", border: 0, background: "#f5f5f5" }}
       title="Şablon editörü"
     />
