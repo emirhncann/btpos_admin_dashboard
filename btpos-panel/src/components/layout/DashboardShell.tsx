@@ -74,6 +74,11 @@ const NAV_ITEMS: NavItem[] = [
     icon: "👤",
   },
   {
+    href: "/dashboard/day-end",
+    label: "Gün Sonu",
+    icon: "📅",
+  },
+  {
     href: "/dashboard/pos-settings",
     label: "POS Ayarları",
     icon: (

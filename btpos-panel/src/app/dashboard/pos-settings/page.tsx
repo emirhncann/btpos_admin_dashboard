@@ -43,6 +43,7 @@ type Panel =
   | "sales" | "discount" | "plu" | "print" | "colors" | "customers";
 type DuplicateItemAction = "increase_qty" | "add_new";
 type PavoInvoiceType = "e_archive" | "paper";
+type InvoiceMode = "z_single" | "per_sale";
 type PrintBehaviorMode = "ask" | "default" | "none";
 type PrintBehaviorKey = "satis" | "tahsilat" | "odeme" | "iade" | "gunsonu" | "etiket" | "manuel";
 
@@ -108,6 +109,7 @@ interface Settings {
   showPrice: boolean; showCode: boolean; showBarcode: boolean;
   duplicateItemAction: DuplicateItemAction;
   invoiceType: PavoInvoiceType;
+  invoiceMode: InvoiceMode;
   minQtyPerLine: number;
   allowLineDiscount: boolean; allowDocDiscount: boolean;
   maxLineDiscountPct: number; maxDocDiscountPct: number;
@@ -262,7 +264,7 @@ function panelsForError(message: string): Panel[] {
   if (text.includes("can_add_customer") || text.includes("can_edit_customer")) add("customers");
   if (text.includes("button_colors") || text.includes("buton") || text.includes("zemin rengi") || text.includes("yazı rengi")) add("colors");
   if (text.includes("touch_keyboard") || text.includes("customer_display") || text.includes("login_with")) add("general");
-  if (text.includes("invoice_type") || text.includes("torba_cari") || text.includes("cari_payment")) add("invoice");
+  if (text.includes("invoice_type") || text.includes("invoice_mode") || text.includes("torba_cari") || text.includes("cari_payment") || text.includes("fatura gönderim")) add("invoice");
   if (text.includes("enabled_payment_brands")) add("payment");
   if (text.includes("barcode")) add("barcode");
   if (text.includes("duplicate_item") || text.includes("min_qty") || text.includes("allow_exit")) add("sales");
@@ -630,7 +632,7 @@ function hexToSoft(hex: string): string {
 
 const DEFAULT: Settings = {
   showPrice: true, showCode: true, showBarcode: false,
-  duplicateItemAction: "increase_qty", invoiceType: "e_archive", minQtyPerLine: 1,
+  duplicateItemAction: "increase_qty", invoiceType: "e_archive", invoiceMode: "z_single", minQtyPerLine: 1,
   allowLineDiscount: true, allowDocDiscount: true,
   maxLineDiscountPct: 100, maxDocDiscountPct: 100,
   pluCols: 4, pluRows: 3, fontSizeName: 12, fontSizePrice: 13, fontSizeCode: 9,
@@ -644,6 +646,10 @@ const DEFAULT: Settings = {
   canAddCustomer: true,
   canEditCustomer: true,
 };
+
+function parseInvoiceMode(value: unknown): InvoiceMode {
+  return value === "per_sale" ? "per_sale" : "z_single";
+}
 
 function boolDefaultTrue(value: unknown): boolean {
   if (value == null || value === "") return true;
@@ -924,6 +930,8 @@ function PosSettingsPage() {
   const [templateIds, setTemplateIds] = useState<Record<string, string>>({});
   const [receiptTemplates, setReceiptTemplates] = useState<{ id: string; name: string; trigger_type: string }[]>([]);
   const [sendPrompt, setSendPrompt] = useState<{ text: string; terminalIds: string[] } | null>(null);
+  const [invoiceModes, setInvoiceModes] = useState<Record<string, InvoiceMode>>({});
+  const [invoiceConfirm, setInvoiceConfirm] = useState(false);
   const [sendingPush, setSendingPush] = useState(false);
 
   // Veri yükleme
@@ -939,6 +947,19 @@ function PosSettingsPage() {
     setWorkplaces(Array.isArray(wpD) ? (wpD as Workplace[]) : []);
     setTerminals( Array.isArray(tD)  ? (tD  as Terminal[]).filter(t => t.is_installed) : []);
     setCashiers(  Array.isArray(cD)  ? (cD  as Cashier[])  : []);
+    try {
+      const listed = await apiFetch<unknown>(`/pos-settings/list/${companyId}`);
+      const rows = Array.isArray(asRecord(listed)?.terminals) ? asRecord(listed)?.terminals as unknown[] : [];
+      const next: Record<string, InvoiceMode> = {};
+      for (const row of rows) {
+        const rec = asRecord(row);
+        const id = textOrNull(rec?.terminal_id);
+        if (id) next[id] = parseInvoiceMode(rec?.invoice_mode);
+      }
+      setInvoiceModes(next);
+    } catch {
+      /* rozet listesi ayar ekranını durdurmaz */
+    }
   }, [companyId]);
 
   useEffect(() => { void loadAll(); }, [loadAll]);
@@ -1193,6 +1214,7 @@ function PosSettingsPage() {
       showBarcode: Boolean(d.show_barcode ?? false),
       duplicateItemAction: d.duplicate_item_action === "add_new" ? "add_new" : "increase_qty",
       invoiceType: d.invoice_type === "paper" ? "paper" : "e_archive",
+      invoiceMode: parseInvoiceMode(d.invoice_mode),
       minQtyPerLine: typeof d.min_qty_per_line === "number" ? d.min_qty_per_line : Number(d.min_qty_per_line) || 1,
       allowLineDiscount: Boolean(d.allow_line_discount ?? true),
       allowDocDiscount: Boolean(d.allow_doc_discount ?? true),
@@ -1218,6 +1240,9 @@ function PosSettingsPage() {
       const theme = normalizeThemeKey(d.theme);
       rememberLook(theme, parseButtonColors(d.button_colors, THEMES[theme].buttons));
     }
+    if (selectedNode?.type === "terminal") {
+      setInvoiceModes((prev) => ({ ...prev, [selectedNode.id]: parseInvoiceMode(d.invoice_mode) }));
+    }
   }
 
   function lookKey(theme: ThemeId, next: Record<ButtonColorKey, ButtonColorDraft>) {
@@ -1238,6 +1263,7 @@ function PosSettingsPage() {
       touch_keyboard: settings.touchKeyboard === true,
       customer_display: settings.customerDisplay === true,
       invoice_type: settings.invoiceType,
+      invoice_mode: settings.invoiceMode,
       torba_cari_id: torbaCariId.trim() || null,
       torba_cari_name: torbaCariName.trim() || null,
       cari_payment_use_pavo: settings.cariPaymentUsePavo === true,
@@ -1336,6 +1362,7 @@ function PosSettingsPage() {
           if (text) nextTemplates[key] = text;
         }
         setTemplateIds(nextTemplates);
+        setInvoiceModes((prev) => ({ ...prev, [node.id]: parseInvoiceMode(d.invoice_mode) }));
       }
       setSettings({
         showPrice: Boolean(d.show_price ?? true),
@@ -1343,6 +1370,7 @@ function PosSettingsPage() {
         showBarcode: Boolean(d.show_barcode ?? false),
         duplicateItemAction: d.duplicate_item_action === "add_new" ? "add_new" : "increase_qty",
         invoiceType: d.invoice_type === "paper" ? "paper" : "e_archive",
+        invoiceMode: parseInvoiceMode(d.invoice_mode),
         minQtyPerLine: typeof d.min_qty_per_line === "number" ? d.min_qty_per_line : Number(d.min_qty_per_line) || 1,
         allowLineDiscount: Boolean(d.allow_line_discount ?? true),
         allowDocDiscount: Boolean(d.allow_doc_discount ?? true),
@@ -1672,8 +1700,13 @@ function PosSettingsPage() {
       .filter((id): id is string => Boolean(id && installed.includes(id)));
   }
 
-  async function save() {
+  async function save(skipInvoiceConfirm = false) {
     if (!companyId || !selectedNode) return;
+    if (selectedNode.type === "terminal" && settings.invoiceMode === "per_sale" && !skipInvoiceConfirm) {
+      setInvoiceConfirm(true);
+      return;
+    }
+    setInvoiceConfirm(false);
     if (selectedNode.type === "terminal" && !settings.loginWithCode && !settings.loginWithCard) {
       const text = "Kaydedilemedi: En az bir giriş yöntemi açık olmalıdır.";
       setResult({ ok: false, text });
@@ -2213,8 +2246,17 @@ function PosSettingsPage() {
                             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                             {terminalLabel(t)}
                           </span>
-                          <span style={{display:"block",fontSize:10,color:"#6B7280",marginTop:1}}>
-                            <VersionHint current={t.app_version} latest={latestVersion} />
+                          <span style={{display:"flex",alignItems:"center",gap:6,marginTop:1,minWidth:0}}>
+                            <span style={{fontSize:10,color:"#6B7280",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              <VersionHint current={t.app_version} latest={latestVersion} />
+                            </span>
+                            <span style={{
+                              flexShrink:0, fontSize:9, fontWeight:700, borderRadius:99, padding:"1px 6px",
+                              background: (invoiceModes[t.id] ?? "z_single") === "per_sale" ? "#FEF3C7" : "#ECFDF5",
+                              color: (invoiceModes[t.id] ?? "z_single") === "per_sale" ? "#92400E" : "#047857",
+                            }}>
+                              {(invoiceModes[t.id] ?? "z_single") === "per_sale" ? "Her satış" : "Z ile tek"}
+                            </span>
                           </span>
                         </span>
                       </div>
@@ -2500,6 +2542,78 @@ function PosSettingsPage() {
                           ⚠️ Kağıt fatura için Pavo ödeme terminali bağlı olmalı ve birim kodları "Birim Eşleştirme" sayfasından tanımlanmış olmalıdır.
                         </div>
                       )}
+                    </div>
+
+                    <div style={{ padding: "16px 0" }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: "#212121", marginBottom: 4 }}>
+                        ERP Fatura Gönderimi
+                      </div>
+                      <div style={{ fontSize: 12, color: "#6B7280", marginBottom: 12 }}>
+                        Carisiz (müşteri seçilmeden yapılan) satışlar İşbaşı&apos;na nasıl gönderilsin?
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {([
+                          {
+                            v: "z_single" as const,
+                            title: "Z raporu ile tek fatura",
+                            recommended: true,
+                            body: "Gün sonunda carisiz satışlar tek faturada, iadeler tek iade faturasında gönderilir. Ödemeler birleştirilir.",
+                          },
+                          {
+                            v: "per_sale" as const,
+                            title: "Her satış ayrı fatura",
+                            recommended: false,
+                            body: "Gün sonunda her carisiz satış ve iade ayrı fatura olarak gönderilir.",
+                            warn: "İşbaşı kotası daha hızlı tükenir.",
+                          },
+                        ]).map((opt) => {
+                          const on = settings.invoiceMode === opt.v;
+                          return (
+                            <button
+                              key={opt.v}
+                              type="button"
+                              role="radio"
+                              aria-checked={on}
+                              onClick={() => set("invoiceMode", opt.v)}
+                              style={{
+                                padding: "12px 14px",
+                                borderRadius: 10,
+                                cursor: "pointer",
+                                textAlign: "left",
+                                border: `2px solid ${on ? "#1565C0" : "#E0E0E0"}`,
+                                background: on ? "#E3F2FD" : "white",
+                              }}
+                            >
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                                <span style={{
+                                  width: 16, height: 16, borderRadius: "50%", flexShrink: 0,
+                                  border: `2px solid ${on ? "#1565C0" : "#9CA3AF"}`,
+                                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                }}>
+                                  {on && <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#1565C0" }} />}
+                                </span>
+                                <span style={{ fontSize: 13, fontWeight: 700, color: on ? "#1565C0" : "#111827" }}>
+                                  {opt.title}
+                                </span>
+                                {opt.recommended && (
+                                  <span style={{ fontSize: 10, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 99, padding: "2px 8px" }}>
+                                    Önerilen
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{ fontSize: 12, color: "#4B5563", paddingLeft: 24 }}>{opt.body}</div>
+                              {opt.warn && (
+                                <div style={{ fontSize: 12, color: "#B45309", paddingLeft: 24, marginTop: 6 }}>
+                                  ⚠ {opt.warn}
+                                </div>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div style={{ marginTop: 10, fontSize: 12, color: "#6B7280" }}>
+                        ℹ Cari satışlar ve cari iadeler her iki seçenekte de ayrı faturadır ve gün sonunda gönderilir.
+                      </div>
                     </div>
                   </>)}
 
@@ -3574,6 +3688,27 @@ function PosSettingsPage() {
                 padding: "8px 12px", borderRadius: 8, border: "none", background: "#C2410C", color: "white",
                 fontWeight: 700, cursor: "pointer",
               }}>{devtoolsBusy ? "..." : "Evet, aç"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {invoiceConfirm && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 10000, background: "rgba(0,0,0,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ background: "white", borderRadius: 14, padding: 24, width: 440 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>Her satış ayrı fatura</div>
+            <div style={{ fontSize: 14, color: "#374151" }}>
+              Her satış ayrı faturalanacak. İşbaşı kotanız bu kasada çok daha hızlı tükenebilir. Devam edilsin mi?
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
+              <button type="button" onClick={() => setInvoiceConfirm(false)} style={{
+                padding: "8px 12px", borderRadius: 8, border: "1px solid #E5E7EB", background: "white", cursor: "pointer",
+              }}>Vazgeç</button>
+              <button type="button" onClick={() => void save(true)} style={{
+                padding: "8px 12px", borderRadius: 8, border: "none", background: "#B45309", color: "white",
+                fontWeight: 700, cursor: "pointer",
+              }}>Devam</button>
             </div>
           </div>
         </div>

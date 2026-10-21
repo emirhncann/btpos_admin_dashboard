@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { withAuth } from "@/components/withAuth";
 import { apiFetch, getCompanyId } from "@/services/api";
+import { fetchCoverage, istanbulMonth } from "@/lib/dayEnd";
 import { VersionHint, fetchAvailableReleases, latestRelease } from "@/lib/appRelease";
 import {
   parseDashboardSummary,
@@ -472,6 +473,7 @@ function DashboardPage() {
   const [error, setError] = useState(false);
   const [showAllAlerts, setShowAllAlerts] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [missingDayEnds, setMissingDayEnds] = useState(0);
   const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
@@ -494,6 +496,12 @@ function DashboardPage() {
       setSummary(parsed);
       writeCache(companyId, parsed);
       setError(false);
+      try {
+        const coverage = await fetchCoverage(istanbulMonth());
+        if (seq === loadSeq.current) setMissingDayEnds(coverage.missing);
+      } catch {
+        if (seq === loadSeq.current) setMissingDayEnds(0);
+      }
       const releases = await fetchAvailableReleases(companyId);
       if (seq !== loadSeq.current) return;
       setLatestVersion(latestRelease(releases)?.version ?? null);
@@ -647,6 +655,16 @@ function DashboardPage() {
             generatedAt={summary.generated_at}
             terminals={summary.terminals}
           />
+          {missingDayEnds > 0 && (
+            <Link href="/dashboard/day-end/" style={{
+              display: "inline-flex", alignItems: "center", margin: "-8px 0 18px",
+              padding: "8px 12px", borderRadius: 10, textDecoration: "none",
+              background: "#FEF2F2", border: "1px solid #FECACA", color: "#B91C1C",
+              fontSize: 13, fontWeight: 800,
+            }}>
+              ⚠ {missingDayEnds} gün gün sonu alınmamış
+            </Link>
+          )}
           <section style={{ minHeight: SECTION_MIN.alerts }}>
             <h2 style={{ fontSize: 15, fontWeight: 700, color: "#111827", margin: "0 0 10px" }}>
               {alerts.length > 0 ? `⚠ Dikkat Gerektirenler (${alerts.length})` : "Dikkat Gerektirenler"}

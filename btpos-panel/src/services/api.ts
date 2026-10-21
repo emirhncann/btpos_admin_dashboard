@@ -49,6 +49,11 @@ function errorMessage(body: unknown, status: number): string {
   if (body && typeof body === "object" && !Array.isArray(body)) {
     const message = (body as { message?: unknown }).message;
     if (typeof message === "string" && message.trim()) return message.trim();
+    const errors = (body as { errors?: unknown }).errors;
+    if (errors && typeof errors === "object" && !Array.isArray(errors)) {
+      const parts = Object.values(errors).filter((value): value is string => typeof value === "string" && value.trim() !== "");
+      if (parts.length > 0) return parts.join(" ");
+    }
   }
   return `İstek başarısız (${status}).`;
 }
