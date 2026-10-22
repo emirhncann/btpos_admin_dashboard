@@ -11,7 +11,9 @@ export type RunStatus =
   | "cancelling"
   | "cancel_failed"
   | "releasing"
-  | "cancelled";
+  | "cancelled"
+  | "rejected"
+  | "awaiting_manual";
 
 export interface CoverageCell {
   date: string;
@@ -26,6 +28,8 @@ export interface CoverageCell {
   total: number | null;
   diff: number | null;
   error: string;
+  statusText: string;
+  hint: string;
 }
 
 export interface CoverageRow {
@@ -38,7 +42,7 @@ export interface CoverageRow {
   cells: Record<string, CoverageCell>;
 }
 
-export type TodoKind = "failed" | "diff" | "missing";
+export type TodoKind = "manual" | "failed" | "rejected" | "diff" | "missing";
 
 export interface TodoItem {
   kind: TodoKind;
@@ -51,6 +55,9 @@ export interface TodoItem {
   diff: number | null;
   runId: string | null;
   error: string;
+  fixLabel: string;
+  fixHref: string;
+  pending: number | null;
 }
 
 export interface CoverageSummary {
@@ -107,6 +114,48 @@ export interface DayEndRun {
   paymentCount: number | null;
   invoiceCount: number | null;
   documents: DayEndDoc[];
+  statusText: string;
+  hint: string;
+  issues: string[];
+  progressDone: number | null;
+  progressTotal: number | null;
+  progressAt: string | null;
+  stalled: boolean;
+  manualPending: number | null;
+  payments: ManualPayment[];
+  fixLabel: string;
+  fixHref: string;
+}
+
+export interface ManualPayment {
+  id: string;
+  number: string;
+  account: string;
+  amount: number | null;
+  invoiceNo: string;
+  customer: string;
+  refund: boolean;
+  invoiceDeleted: boolean;
+  confirmed: boolean;
+  confirmedBy: string;
+  confirmedAt: string | null;
+}
+
+export type ReadinessLevel = "ready" | "warn" | "block" | "empty" | "done" | "unknown";
+
+export interface ReadinessTill {
+  terminalId: string;
+  name: string;
+  number: string;
+  level: ReadinessLevel;
+  statusText: string;
+  hint: string;
+  sales: number | null;
+  unsent: number | null;
+  invoiceNo: string;
+  fixLabel: string;
+  fixHref: string;
+  selectable: boolean;
 }
 
 export interface DayEndRequest {
@@ -255,7 +304,7 @@ export function modeLabel(mode: string, long = false): string {
 }
 
 export const RUN_LABEL: Record<RunStatus, string> = {
-  queued: "Kuyrukta",
+  queued: "Kasa bekleniyor",
   sending: "Gönderiliyor",
   completed: "Tamamlandı",
   completed_empty: "Satış yok",
@@ -264,6 +313,8 @@ export const RUN_LABEL: Record<RunStatus, string> = {
   cancel_failed: "İptal yarım kaldı",
   releasing: "Kasa serbest bırakıyor",
   cancelled: "İptal edildi",
+  rejected: "Gönderilmedi",
+  awaiting_manual: "Tahsilatlar elle silinmeli",
 };
 
 export const CELL_LABEL: Record<CellState, string> = {
@@ -329,6 +380,7 @@ function cellState(value: unknown): CellState {
   if (["missing", "absent", "open", "due"].includes(raw)) return "missing";
   if (["partial", "incomplete"].includes(raw)) return "partial";
   if (["processing", "sending", "queued", "running", "pending"].includes(raw)) return "processing";
+  if (["rejected", "awaiting_manual", "manual"].includes(raw)) return "error";
   if (["error", "failed", "fail"].includes(raw)) return "error";
   if (["unknown", "legacy", "no_data"].includes(raw)) return "unknown";
   if (["none", "today", "future", "na", "n/a"].includes(raw)) return "none";
@@ -345,6 +397,8 @@ function runStatus(value: unknown): RunStatus {
   if (["cancelling", "canceling"].includes(raw)) return "cancelling";
   if (["releasing", "release"].includes(raw)) return "releasing";
   if (["cancelled", "canceled"].includes(raw)) return "cancelled";
+  if (["rejected", "declined"].includes(raw)) return "rejected";
+  if (["awaiting_manual", "manual_payments", "awaiting_payments"].includes(raw)) return "awaiting_manual";
   if (["failed", "error"].includes(raw)) return "failed";
   return "queued";
 }
@@ -366,12 +420,16 @@ function parseCell(raw: unknown, date: string, today: string): CoverageCell {
     total: num(rec.total ?? rec.amount ?? rec.terminal_total),
     diff: num(rec.diff ?? rec.difference),
     error: text(rec.error ?? rec.error_message),
+    statusText: text(rec.status_text),
+    hint: text(rec.hint ?? rec.status_hint),
   };
 }
 
 function todoKind(value: unknown): TodoKind | null {
   const raw = text(value).toLowerCase();
+  if (["manual", "awaiting_manual"].includes(raw)) return "manual";
   if (["failed", "error", "hatali", "hata"].includes(raw)) return "failed";
+  if (["rejected", "gonderilmedi"].includes(raw)) return "rejected";
   if (["diff", "mismatch", "fark"].includes(raw)) return "diff";
   if (["missing", "unsent", "eksik"].includes(raw)) return "missing";
   return null;
@@ -414,9 +472,9 @@ function deriveTodos(rows: CoverageRow[]): TodoItem[] {
     for (const cell of Object.values(row.cells)) {
       const base = { terminalId: row.terminalId, name: row.name, number: row.number, date: cell.date, runId: cell.runId };
       if (cell.state === "error") {
-        items.push({ ...base, kind: "failed", text: cell.error || "Kasa bitiremedi", unsent: cell.unsent, diff: cell.diff, error: cell.error });
+        items.push({ ...base, kind: "failed", text: cell.error || "Kasa bitiremedi", unsent: cell.unsent, diff: cell.diff, error: cell.error, fixLabel: "", fixHref: "", pending: null });
       } else if (cell.state === "done" && cell.diff != null && Math.round(cell.diff * 100) !== 0) {
-        items.push({ ...base, kind: "diff", text: "", unsent: null, diff: cell.diff, error: "" });
+        items.push({ ...base, kind: "diff", text: "", unsent: null, diff: cell.diff, error: "", fixLabel: "", fixHref: "", pending: null });
       } else if (cell.state === "missing") {
         const count = cell.unsent ?? cell.sales;
         items.push({
@@ -426,11 +484,14 @@ function deriveTodos(rows: CoverageRow[]): TodoItem[] {
           unsent: count,
           diff: null,
           error: "",
+          fixLabel: "",
+          fixHref: "",
+          pending: null,
         });
       }
     }
   }
-  const order: Record<TodoKind, number> = { failed: 0, diff: 1, missing: 2 };
+  const order: Record<TodoKind, number> = { manual: 0, failed: 1, rejected: 2, diff: 3, missing: 4 };
   return items.sort((a, b) => order[a.kind] - order[b.kind] || a.date.localeCompare(b.date) || a.name.localeCompare(b.name, "tr"));
 }
 
@@ -481,7 +542,7 @@ export function parseCoverage(payload: unknown, month: string): Coverage {
   const todos = Array.isArray(todoRaw)
     ? todoRaw.map(parseTodo).filter((item): item is TodoItem => item !== null)
     : deriveTodos(rows);
-  const order: Record<TodoKind, number> = { failed: 0, diff: 1, missing: 2 };
+  const order: Record<TodoKind, number> = { manual: 0, failed: 1, rejected: 2, diff: 3, missing: 4 };
   todos.sort((a, b) => order[a.kind] - order[b.kind] || a.date.localeCompare(b.date));
   return { month, missing: summary.missing, summary, todos, rows };
 }
@@ -496,12 +557,15 @@ function parseTodo(raw: unknown): TodoItem | null {
   const unsent = num(rec.unsent ?? rec.unsent_count ?? rec.sale_count ?? rec.sales);
   const diff = num(rec.diff ?? rec.difference);
   const error = text(rec.error ?? rec.error_message);
-  const textValue = text(rec.text ?? rec.message) || (
+  const textValue = text(rec.text ?? rec.message ?? rec.hint) || (
     kind === "failed" ? (error || "Kasa bitiremedi")
-      : kind === "missing" ? (unsent != null ? `${unsent} satış gönderilmedi` : "Gün sonu alınmamış")
-        : ""
+      : kind === "rejected" ? (error || "Gönderilmedi")
+        : kind === "manual" ? "tahsilat elle silinmeyi bekliyor"
+          : kind === "missing" ? (unsent != null ? `${unsent} satış gönderilmedi` : "Gün sonu alınmamış")
+            : ""
   );
   const runIds = Array.isArray(rec.run_ids) ? rec.run_ids.map(text).filter(Boolean) : [];
+  const fix = asRecord(rec.fix ?? rec.suggestion);
   return {
     kind,
     terminalId,
@@ -513,6 +577,9 @@ function parseTodo(raw: unknown): TodoItem | null {
     diff,
     runId: text(rec.run_id) || runIds[0] || null,
     error,
+    fixLabel: text(rec.fix_label ?? fix?.label) || (kind === "rejected" ? "Düzeltme önerisi" : ""),
+    fixHref: text(rec.fix_url ?? rec.fix_href ?? fix?.url ?? fix?.href),
+    pending: num(rec.pending ?? rec.pending_count ?? rec.manual_pending),
   };
 }
 
@@ -586,7 +653,82 @@ export function parseRun(raw: unknown): DayEndRun | null {
     paymentCount: num(rec.payment_count ?? rec.collection_count),
     invoiceCount: num(rec.invoice_count ?? rec.document_count),
     documents,
+    statusText: text(rec.status_text),
+    hint: text(rec.hint ?? rec.status_hint),
+    issues: issuesOf(rec.issues ?? rec.problems ?? rec.reasons),
+    progressDone: num(rec.progress_done ?? rec.sent_count ?? rec.done_count ?? asRecord(rec.progress)?.done ?? asRecord(rec.progress)?.current),
+    progressTotal: num(rec.progress_total ?? rec.total_count ?? rec.document_count ?? asRecord(rec.progress)?.total),
+    progressAt: text(rec.progress_at ?? rec.last_progress_at ?? rec.updated_at) || null,
+    stalled: rec.stalled === true || rec.progress_stale === true,
+    manualPending: num(rec.manual_pending ?? rec.pending_payment_count),
+    payments: parsePayments(rec),
+    fixLabel: text(rec.fix_label ?? asRecord(rec.fix)?.label),
+    fixHref: text(rec.fix_url ?? rec.fix_href ?? asRecord(rec.fix)?.url),
   };
+}
+
+function issuesOf(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (typeof item === "string") return item.trim();
+      const rec = asRecord(item);
+      return text(rec?.text ?? rec?.message ?? rec?.error ?? rec?.reason);
+    }).filter(Boolean);
+  }
+  const raw = text(value);
+  if (!raw) return [];
+  return raw.split(/\n+/).map((part) => part.replace(/^[•\-]\s*/, "").trim()).filter(Boolean);
+}
+
+function parsePayment(raw: unknown, index: number): ManualPayment | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+  const kind = text(rec.doc_kind ?? rec.kind ?? rec.type).toLowerCase();
+  const number = text(rec.erp_number ?? rec.collection_no ?? rec.payment_no ?? rec.erp_id ?? rec.number);
+  const description = text(rec.description ?? rec.title ?? rec.label);
+  const account = text(rec.account ?? rec.account_name ?? rec.method ?? rec.method_name ?? rec.payment_label ?? rec.part)
+    || description.split("·").slice(1).join("·").trim();
+  const invoiceNo = text(rec.invoice_number ?? rec.invoice_no ?? rec.parent_invoice ?? rec.parent_erp_number);
+  const amount = num(rec.amount ?? rec.terminal_amount ?? rec.erp_amount ?? rec.pos_amount);
+  const status = text(rec.status ?? rec.state).toLowerCase();
+  const confirmed = rec.confirmed === true || rec.acknowledged === true || ["manual_deleted", "acknowledged", "elle_silindi"].includes(status);
+  return {
+    id: text(rec.id) || number || String(index),
+    number,
+    account: account || "Tahsilat",
+    amount,
+    invoiceNo: invoiceNo || (description.match(/\d{6,}/)?.[0] ?? ""),
+    customer: text(rec.customer_name ?? rec.customer ?? asRecord(rec.customer)?.name),
+    refund: kind.includes("refund") || kind.includes("iade") || (amount != null && amount < 0) || description.toLowerCase().includes("iade"),
+    invoiceDeleted: rec.invoice_deleted === true || text(rec.invoice_status).toLowerCase() === "deleted" || description.toLowerCase().includes("silindi"),
+    confirmed,
+    confirmedBy: text(rec.confirmed_by_name ?? rec.acknowledged_by_name ?? rec.deleted_by_name),
+    confirmedAt: text(rec.confirmed_at ?? rec.acknowledged_at ?? rec.manual_deleted_at) || null,
+  };
+}
+
+function parsePayments(rec: Record<string, unknown>): ManualPayment[] {
+  const dedicated = rec.manual_payments ?? rec.pending_payments ?? rec.collections;
+  if (Array.isArray(dedicated)) {
+    return dedicated.map(parsePayment).filter((item): item is ManualPayment => item !== null);
+  }
+  const payments: ManualPayment[] = [];
+  const walk = (list: unknown[], invoiceNo: string) => {
+    for (const raw of list) {
+      const row = asRecord(raw);
+      if (!row) continue;
+      const kind = text(row.doc_kind ?? row.kind).toLowerCase();
+      const ownNo = text(row.erp_number ?? row.invoice_no ?? row.erp_no);
+      if (kind === "payment" || kind.includes("tahsil")) {
+        const payment = parsePayment({ ...row, invoice_number: text(row.invoice_number ?? row.invoice_no) || invoiceNo }, payments.length);
+        if (payment) payments.push(payment);
+      }
+      const kids = row.payments ?? row.children;
+      if (Array.isArray(kids)) walk(kids, kind === "payment" ? invoiceNo : ownNo || invoiceNo);
+    }
+  };
+  walk(listOf(rec.documents ?? rec.items ?? []), "");
+  return payments;
 }
 
 export function parseRuns(payload: unknown): DayEndRun[] {
@@ -792,6 +934,161 @@ export async function startDayEnd(request: DayEndRequest): Promise<DayEndResult[
 
 export async function cancelDayEnd(id: string): Promise<void> {
   await apiFetch<unknown>(`/admin/day-end/runs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function weekdayLong(date: string): string {
+  const [year, month, day] = date.split("-").map(Number);
+  if (!year || !month || !day) return "";
+  const raw = new Intl.DateTimeFormat("tr-TR", { weekday: "long", timeZone: "UTC" }).format(new Date(Date.UTC(year, month - 1, day, 12)));
+  return raw.charAt(0).toLocaleUpperCase("tr-TR") + raw.slice(1);
+}
+
+export function formatClock(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("tr-TR", {
+    timeZone: "Europe/Istanbul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+}
+
+export function isStalled(run: DayEndRun): boolean {
+  if (run.status !== "sending") return false;
+  if (run.stalled) return true;
+  if (!run.progressAt) return false;
+  const at = new Date(run.progressAt).getTime();
+  if (Number.isNaN(at)) return false;
+  return Date.now() - at >= 30 * 60 * 1000;
+}
+
+export function canRetry(run: DayEndRun): boolean {
+  return run.status === "failed" || isStalled(run);
+}
+
+export function canRetake(status: RunStatus): boolean {
+  return status === "rejected" || status === "cancelled";
+}
+
+export function canCloseManual(status: RunStatus): boolean {
+  return status === "completed" || status === "failed" || status === "cancel_failed" || status === "cancelling" || status === "awaiting_manual";
+}
+
+interface ReadinessCheck {
+  level: string;
+  code: string;
+  message: string;
+}
+
+function readinessChecks(value: unknown): ReadinessCheck[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const rec = asRecord(item);
+    if (!rec) return [];
+    return [{
+      level: text(rec.level).toLowerCase(),
+      code: text(rec.code).toLowerCase(),
+      message: text(rec.message ?? rec.text),
+    }];
+  });
+}
+
+function parseReadinessTill(raw: unknown): ReadinessTill | null {
+  const rec = asRecord(raw);
+  if (!rec) return null;
+  const terminalId = text(rec.terminal_id ?? rec.id);
+  if (!terminalId) return null;
+  const checks = readinessChecks(rec.checks);
+  const errors = checks.filter((item) => item.level === "error" && item.message);
+  const warns = checks.filter((item) => item.level === "warn" && item.message);
+  const taken = errors.length > 0 && errors.every((item) => item.code === "active_run" || item.message.toLowerCase().includes("zaten alındı"));
+  const summary = asRecord(rec.summary);
+  const summaryMissing = rec.summary == null || rec.has_summary === false;
+  const sales = summary ? num(summary.sale_count ?? summary.sales) : num(rec.sale_count ?? rec.sales);
+  const unsent = summary ? num(summary.unsent_count ?? summary.unsent) : num(rec.unsent ?? rec.unsent_count ?? rec.unsent_sales);
+  let level: ReadinessLevel = "ready";
+  if (taken) level = "done";
+  else if (errors.length > 0) level = "block";
+  else if (summaryMissing && checks.length > 0) level = "unknown";
+  else if ((sales ?? 0) === 0 && (unsent ?? 0) === 0) level = "empty";
+  else if (warns.length > 0) level = "warn";
+  const rawLevel = text(rec.level ?? rec.state ?? rec.status).toLowerCase();
+  if (checks.length === 0) {
+    if (["unknown", "no_data", "legacy"].includes(rawLevel) || summaryMissing) level = "unknown";
+    else if (["empty", "no_sales"].includes(rawLevel)) level = "empty";
+    else if (["done", "taken", "already"].includes(rawLevel)) level = "done";
+    else if (["block", "blocked", "error"].includes(rawLevel) || rec.blocked === true) level = "block";
+    else if (["warn", "warning", "offline"].includes(rawLevel) || rec.offline === true) level = "warn";
+  }
+  const selectable = level === "ready" || level === "warn" || level === "unknown";
+  const problem = errors.map((item) => item.message).join(" · ");
+  const warning = warns.map((item) => item.message).join(" · ");
+  const torba = errors.some((item) => item.code === "torba");
+  const statusText = level === "unknown"
+    ? "Kasa özet göndermedi, satış olup olmadığı bilinmiyor."
+    : level === "empty"
+      ? "Satış yok"
+      : level === "done"
+        ? (errors[0]?.message || "Zaten alındı")
+        : level === "block"
+          ? problem || "Sorun"
+          : level === "warn"
+            ? warning || text(rec.status_text)
+            : text(rec.status_text) || "Hazır";
+  return {
+    terminalId,
+    name: text(rec.terminal_name ?? rec.name) || "Kasa",
+    number: text(rec.terminal_number ?? rec.number),
+    level,
+    statusText,
+    hint: level === "warn" ? "" : text(rec.hint ?? rec.detail),
+    sales,
+    unsent,
+    invoiceNo: text(rec.invoice_no ?? rec.invoice_number ?? (Array.isArray(rec.invoice_numbers) ? rec.invoice_numbers[0] : "")),
+    fixLabel: torba ? "Kasa ayarlarına git" : "",
+    fixHref: torba ? "/dashboard/pos-settings/" : "",
+    selectable,
+  };
+}
+
+export function shouldAutoCheck(row: ReadinessTill): boolean {
+  if (!row.selectable || (row.level !== "ready" && row.level !== "warn")) return false;
+  if (row.unsent != null) return row.unsent > 0;
+  return (row.sales ?? 0) > 0;
+}
+
+export async function fetchReadiness(query: { terminalIds: string[]; date?: string; rangeStart?: string; rangeEnd?: string }): Promise<ReadinessTill[]> {
+  const params = new URLSearchParams();
+  params.set("terminal_ids", query.terminalIds.join(","));
+  if (query.date) params.set("date", query.date);
+  if (query.rangeStart) params.set("range_start", query.rangeStart);
+  if (query.rangeEnd) params.set("range_end", query.rangeEnd);
+  const data = await apiFetch<unknown>(`/admin/day-end/readiness?${params.toString()}`);
+  const body = asRecord(data);
+  return listOf(body?.terminals ?? body?.rows ?? body?.tills ?? data).map(parseReadinessTill).filter((row): row is ReadinessTill => row !== null);
+}
+
+export async function retryDayEnd(id: string): Promise<void> {
+  await apiFetch<unknown>(`/admin/day-end/runs/${encodeURIComponent(id)}/retry`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function confirmPayments(id: string, ids: string[] | "all"): Promise<void> {
+  await apiFetch<unknown>(`/admin/day-end/runs/${encodeURIComponent(id)}/payments/confirm`, {
+    method: "POST",
+    body: JSON.stringify(ids === "all" ? { all: true } : { ids }),
+  });
+}
+
+export async function closeDayEndManual(id: string): Promise<void> {
+  await apiFetch<unknown>(`/admin/day-end/runs/${encodeURIComponent(id)}/close-manual`, {
     method: "POST",
     body: JSON.stringify({}),
   });
