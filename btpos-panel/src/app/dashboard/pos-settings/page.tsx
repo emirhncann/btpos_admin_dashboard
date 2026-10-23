@@ -597,17 +597,128 @@ async function fetchTerminalBackup(terminalId: string): Promise<TerminalLocalBac
   };
 }
 
-type CariRow = { code: string; name: string };
+type TorbaCari = {
+  erp_id: string;
+  code: string;
+  name: string;
+  taxNo: string;
+  taxOffice: string;
+  isPerson: boolean;
+  firstName: string;
+  lastName: string;
+  phone: string;
+  email: string;
+  city: string;
+  district: string;
+  address: string;
+  postalCode: string;
+};
+
+type CariRow = {
+  code: string;
+  name: string;
+  id: string;
+  erp_id: string;
+  taxNo: string;
+  taxOffice: string;
+  isPerson: boolean;
+  firstName: string;
+  lastName: string;
+  phone: string;
+  email: string;
+  city: string;
+  district: string;
+  address: string;
+  postalCode: string;
+};
+
+function cariText(row: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text && text !== "null" && text !== "undefined") return text;
+  }
+  return "";
+}
+
+function cariBool(row: Record<string, unknown>, keys: string[]): boolean {
+  for (const key of keys) {
+    if (!(key in row) || row[key] == null) continue;
+    const value = row[key];
+    if (typeof value === "boolean") return value;
+    if (value === 1 || value === "1" || value === "true") return true;
+    if (value === 0 || value === "0" || value === "false") return false;
+  }
+  return false;
+}
+
+function torbaFromRow(row: Record<string, unknown>): TorbaCari {
+  const code = cariText(row, ["code", "Code", "customer_code"]);
+  const id = cariText(row, ["id"]);
+  return {
+    erp_id: cariText(row, ["erp_id", "erpId"]) || id,
+    code,
+    name: cariText(row, ["name", "Name", "title", "unvan", "fullName"]),
+    taxNo: cariText(row, ["taxNo", "tax_no", "vknTckn", "taxOrPersonalId"]),
+    taxOffice: cariText(row, ["taxOffice", "tax_office"]),
+    isPerson: cariBool(row, ["isPerson", "is_person", "isPersonalCompany"]),
+    firstName: cariText(row, ["firstName", "first_name", "firstname"]),
+    lastName: cariText(row, ["lastName", "last_name", "lastname"]),
+    phone: cariText(row, ["phone", "gsm"]),
+    email: cariText(row, ["email", "emailAddress"]),
+    city: cariText(row, ["city"]),
+    district: cariText(row, ["district", "town"]),
+    address: cariText(row, ["address"]),
+    postalCode: cariText(row, ["postalCode", "postal_code"]),
+  };
+}
+
+function parseTorbaCari(raw: unknown): TorbaCari | null {
+  let value = raw;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === "null") return null;
+    try {
+      value = JSON.parse(trimmed) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  const row = asRecord(value);
+  if (!row) return null;
+  const cari = torbaFromRow(row);
+  if (!cari.erp_id && !cari.code && !cari.name) return null;
+  return cari;
+}
+
+function maskTax(value: string): string {
+  const text = value.trim();
+  if (!text) return "—";
+  if (text.length <= 7) return text;
+  return `${text.slice(0, 4)}…${text.slice(-3)}`;
+}
+
+function readTorba(d: Record<string, unknown>): { id: string; name: string; cari: TorbaCari | null } {
+  const rawTid = d.torba_cari_id ?? d.tstorba_cari_id;
+  const tid = rawTid != null ? String(rawTid).trim() : "";
+  const tnm = d.torba_cari_name != null ? String(d.torba_cari_name).trim() : "";
+  const cari = parseTorbaCari(d.torba_cari);
+  const id = tid && tid !== "null" && tid !== "undefined" ? tid : (cari?.code ?? "");
+  const name = tnm && tnm !== "null" && tnm !== "undefined" ? tnm : (cari?.name ?? "");
+  return { id, name, cari };
+}
 
 function normalizeCariRows(arr: unknown[]): CariRow[] {
   return arr
-    .map((x) => {
-      const o = x as Record<string, unknown>;
-      const code = String(o.code ?? o.Code ?? o.id ?? o.customer_code ?? "").trim();
-      const name = String(o.name ?? o.Name ?? o.title ?? o.unvan ?? "").trim();
-      return { code, name };
+    .map((item) => {
+      const row = asRecord(item);
+      if (!row) return null;
+      const cari = torbaFromRow(row);
+      if (!cari.code && !cari.name) return null;
+      return { ...cari, id: cariText(row, ["id"]) || cari.erp_id };
     })
-    .filter((c) => c.code.length > 0 || c.name.length > 0);
+    .filter((row): row is CariRow => row != null);
 }
 
 function parseCustomerListResponse(res: unknown): CariRow[] {
@@ -903,6 +1014,7 @@ function PosSettingsPage() {
 
   const [torbaCariId,   setTorbaCariId]   = useState("");
   const [torbaCariName, setTorbaCariName] = useState("");
+  const [torbaCari,     setTorbaCari]     = useState<TorbaCari | null>(null);
   const [cariSearch,    setCariSearch]    = useState("");
   const [cariResults,   setCariResults]   = useState<CariRow[]>([]);
   const [cariLoading,   setCariLoading]   = useState(false);
@@ -1190,11 +1302,10 @@ function PosSettingsPage() {
   }
 
   function applySettings(d: Record<string, unknown>) {
-    const rawTid = d.torba_cari_id ?? d.tstorba_cari_id;
-    const tid = rawTid != null ? String(rawTid).trim() : "";
-    const tnm = d.torba_cari_name != null ? String(d.torba_cari_name).trim() : "";
-    setTorbaCariId(tid && tid !== "null" && tid !== "undefined" ? tid : "");
-    setTorbaCariName(tnm && tnm !== "null" && tnm !== "undefined" ? tnm : "");
+    const torba = readTorba(d);
+    setTorbaCariId(torba.id);
+    setTorbaCariName(torba.name);
+    setTorbaCari(torba.cari);
     const brands = Array.isArray(d.enabled_payment_brands)
       ? d.enabled_payment_brands.map((id) => Number(id)).filter((id) => Number.isFinite(id))
       : null;
@@ -1266,6 +1377,7 @@ function PosSettingsPage() {
       invoice_mode: settings.invoiceMode,
       torba_cari_id: torbaCariId.trim() || null,
       torba_cari_name: torbaCariName.trim() || null,
+      torba_cari: (torbaCariId.trim() || torbaCariName.trim()) ? torbaCari : null,
       cari_payment_use_pavo: settings.cariPaymentUsePavo === true,
       enabled_payment_brands: terminalBrands[nodeId] ?? [],
       login_with_code: settings.loginWithCode === true,
@@ -1342,15 +1454,15 @@ function PosSettingsPage() {
       if (node.type === "cashier") {
         setTorbaCariId("");
         setTorbaCariName("");
+        setTorbaCari(null);
         setCariSearch("");
         setCariResults([]);
       }
-      const rawTid = d.torba_cari_id ?? d.tstorba_cari_id;
-      const tid = rawTid != null ? String(rawTid).trim() : "";
-      const tnm = d.torba_cari_name != null ? String(d.torba_cari_name).trim() : "";
+      const torba = readTorba(d);
       if (node.type === "terminal") {
-        setTorbaCariId(tid && tid !== "null" && tid !== "undefined" ? tid : "");
-        setTorbaCariName(tnm && tnm !== "null" && tnm !== "undefined" ? tnm : "");
+        setTorbaCariId(torba.id);
+        setTorbaCariName(torba.name);
+        setTorbaCari(torba.cari);
         const brands = Array.isArray(d.enabled_payment_brands)
           ? d.enabled_payment_brands.map((id) => Number(id)).filter((id) => Number.isFinite(id))
           : null;
@@ -1401,6 +1513,7 @@ function PosSettingsPage() {
       setSettings(DEFAULT);
       setTorbaCariId("");
       setTorbaCariName("");
+      setTorbaCari(null);
       setDevtools(CLOSED_DEVTOOLS);
       rememberLook("klasik", defaultButtonColors());
       setResult({ ok: false, text: "Ayarlar yüklenemedi." });
@@ -1416,6 +1529,7 @@ function PosSettingsPage() {
       setSettings(DEFAULT);
       setTorbaCariId("");
       setTorbaCariName("");
+      setTorbaCari(null);
       setCariSearch("");
       setCariResults([]);
       setPavoDevice(null);
@@ -3370,7 +3484,7 @@ function PosSettingsPage() {
                           </span>
                         ) : null}
                         <button type="button"
-                          onClick={() => { setTorbaCariId(""); setTorbaCariName(""); }}
+                          onClick={() => { setTorbaCariId(""); setTorbaCariName(""); setTorbaCari(null); }}
                           style={{ marginLeft: "auto", background: "none", border: "none",
                             cursor: "pointer", fontSize: 13, color: "#9CA3AF" }}>
                           ✕
@@ -3409,6 +3523,22 @@ function PosSettingsPage() {
                                 onClick={() => {
                                   setTorbaCariId(c.code);
                                   setTorbaCariName(c.name);
+                                  setTorbaCari({
+                                    erp_id: String(c.erp_id ?? c.id ?? ""),
+                                    code: c.code,
+                                    name: c.name,
+                                    taxNo: c.taxNo ?? "",
+                                    taxOffice: c.taxOffice ?? "",
+                                    isPerson: Boolean(c.isPerson),
+                                    firstName: c.firstName ?? "",
+                                    lastName: c.lastName ?? "",
+                                    phone: c.phone ?? "",
+                                    email: c.email ?? "",
+                                    city: c.city ?? "",
+                                    district: c.district ?? "",
+                                    address: c.address ?? "",
+                                    postalCode: c.postalCode ?? "",
+                                  });
                                   setCariSearch("");
                                   setCariResults([]);
                                 }}
@@ -3424,6 +3554,21 @@ function PosSettingsPage() {
                           </div>
                         )}
                       </div>
+                    )}
+                    {torbaCariId && !torbaCari?.erp_id && (
+                      <div style={{ marginTop: 8, padding: "8px 12px", borderRadius: 8, background: "#FFF7ED", border: "1px solid #FDBA74", color: "#C2410C", fontSize: 12, fontWeight: 600 }}>
+                        Bu torba cari eski yöntemle kaydedilmiş. Gün sonu faturaları için torba cariyi bir kez yeniden seçip kaydedin.
+                      </div>
+                    )}
+                    {torbaCariName && (
+                      <>
+                        <div style={{ marginTop: 8, fontSize: 12, color: "#6B7280" }}>
+                          İşbaşı kimliği: {torbaCari?.erp_id || "—"} · Vergi/TC: {maskTax(torbaCari?.taxNo ?? "")} · {torbaCari ? (torbaCari.isPerson ? "Şahıs" : "Kurum") : "—"}
+                        </div>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#6B7280" }}>
+                          Kasalar carisiz satışlarda bu cariyi kullanır. Değişiklik bir sonraki gün sonundan itibaren geçerlidir; kasaya ayar göndermek gerekmez.
+                        </div>
+                      </>
                     )}
                   </div>
                   </>
